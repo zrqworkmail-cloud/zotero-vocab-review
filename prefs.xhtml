@@ -1,0 +1,29 @@
+<vbox xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+      xmlns:html="http://www.w3.org/1999/xhtml">
+  <groupbox>
+    <caption label="收词与复习"/>
+    <checkbox id="zvr-auto-sync" label="高亮或下划线后自动同步到 Anki"
+              preference="extensions.zotero.vocabReview.autoSync"/>
+    <checkbox id="zvr-review-popups" label="启用定时复习弹窗"
+              preference="extensions.zotero.vocabReview.reviewPopups"/>
+    <hbox align="center">
+      <label value="通知弹窗关闭时间（1–120 秒）"/>
+      <html:input id="zvr-notification-seconds" type="number" min="1" max="120"
+                  preference="extensions.zotero.vocabReview.notificationSeconds"/>
+    </hbox>
+  </groupbox>
+  <groupbox>
+    <caption label="AnkiConnect"/>
+    <label value="本机地址"/>
+    <textbox id="zvr-anki-endpoint" preference="extensions.zotero.vocabReview.endpoint"/>
+    <label value="牌组名称"/>
+    <textbox id="zvr-anki-deck" preference="extensions.zotero.vocabReview.deckName"/>
+    <label value="笔记类型名称"/>
+    <textbox id="zvr-anki-model" preference="extensions.zotero.vocabReview.modelName"/>
+    <label value="单词字段（必须为第一个字段）"/>
+    <textbox id="zvr-anki-front-field" preference="extensions.zotero.vocabReview.frontField"/>
+    <label value="释义字段"/>
+    <textbox id="zvr-anki-back-field" preference="extensions.zotero.vocabReview.backField"/>
+    <description>设置会立即保存。可在“工具 → 词汇：状态与连接诊断”检查 Anki 连接和字段。</description>
+  </groupbox>
+</vbox>

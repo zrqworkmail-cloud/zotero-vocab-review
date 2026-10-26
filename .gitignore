@@ -1,0 +1,10 @@
+/dist/
+/anki-global-addon/dist/
+/.verification/
+/runtime-verification/
+/.update-feed/
+__pycache__/
+*.pyc
+*.log
+*.sqlite*
+*.xpi

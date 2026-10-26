@@ -1,0 +1,10 @@
+{
+  "mode": "preview",
+  "modifiers": 6,
+  "virtual_key": 121,
+  "deck": "文献单词",
+  "model": "四六级单词模板",
+  "front_field": "正面",
+  "back_field": "解释",
+  "confirm_seconds": 8
+}
