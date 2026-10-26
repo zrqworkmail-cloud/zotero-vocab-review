@@ -1,0 +1,62 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+concurrency:
+  group: release-publication
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check tag and run tests
+        run: |
+          python -c 'import json,os; assert os.environ["GITHUB_REF_NAME"] == "v" + json.load(open("manifest.json"))["version"]'
+          node --check bootstrap.js
+          node --test tests/plugin.test.cjs
+          python -m unittest discover -s tests -p 'test_build.py'
+      - name: Build release
+        run: |
+          python build.py --repository "$GITHUB_REPOSITORY"
+          python anki-global-addon/build.py
+      - name: Publish release
+        shell: bash
+        run: |
+          extra=()
+          if [[ "$GITHUB_REF_NAME" == *-beta.* ]]; then extra+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" dist/*.xpi dist/SHA256SUMS anki-global-addon/dist/zotero_global_capture.zip anki-global-addon/dist/SHA256SUMS --verify-tag --title "$GITHUB_REF_NAME" --notes-file docs/RELEASE_NOTES.md "${extra[@]}"
+      - name: Publish update feeds after release assets exist
+        shell: bash
+        run: |
+          gh auth setup-git
+          if git ls-remote --exit-code --heads origin updates >/dev/null; then
+            git clone --single-branch --branch updates "https://github.com/$GITHUB_REPOSITORY.git" .update-feed
+          else
+            mkdir .update-feed
+            git -C .update-feed init
+            git -C .update-feed remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+          fi
+          if [[ "$GITHUB_REF_NAME" == *-beta.* ]]; then
+            python tools/merge-update-feed.py dist/updates-beta.json .update-feed/updates-beta.json
+          else
+            python tools/merge-update-feed.py dist/updates.json .update-feed/updates.json
+            python tools/merge-update-feed.py dist/updates.json .update-feed/updates-beta.json
+          fi
+          git -C .update-feed config user.name 'github-actions[bot]'
+          git -C .update-feed config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C .update-feed add '*.json'
+          if ! git -C .update-feed diff --cached --quiet; then
+            git -C .update-feed commit -m "Publish update feeds for $GITHUB_REF_NAME"
+            git -C .update-feed push origin HEAD:updates
+          fi
