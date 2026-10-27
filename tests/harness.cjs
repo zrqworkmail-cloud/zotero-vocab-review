@@ -32,6 +32,7 @@ function createHarness(options = {}) {
       locale: 'zh-CN', initializationPromise: Promise.resolve(), uiReadyPromise: Promise.resolve(),
       Prefs: { get: key => prefs.get(key), set: (key, val) => prefs.set(key, val) },
       Items: { get: id => items.get(id) },
+      PreferencePanes: { register: async () => {} },
       Notifier: {
         registerObserver: ref => { observer = ref; return 'observer'; },
         unregisterObserver: () => { observer = null; },
