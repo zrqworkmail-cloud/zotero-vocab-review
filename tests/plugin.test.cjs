@@ -169,7 +169,7 @@ test('backup preserves previous snapshot and exported JSON retains review/sync s
 test('local health endpoint exposes aggregate status and is removed at shutdown', async () => {
   const h=createHarness(); await h.run('startup()');
   const value=JSON.parse(h.run('new StatusEndpoint().init()[2]'));
-  assert.equal(value.version,'0.4.0-beta.3');
+  assert.equal(value.version,h.run('PLUGIN_VERSION'));
   assert.equal(value.listenerRegistered,true);
   assert.equal(value.words,0);
   assert.equal(value.autoSync,true);
