@@ -12,6 +12,17 @@
               "strict_max_version": "10.0.*"
             }
           }
+        },
+        {
+          "version": "0.4.0-beta.8",
+          "update_link": "https://github.com/zrqworkmail-cloud/zotero-vocab-review/releases/download/v0.4.0-beta.8/zotero-vocab-review-0.4.0-beta.8.xpi",
+          "update_hash": "sha256:96cb8f25c32443cf6d96da6272090e035f4e9454f1b0cc8836d25eba371e08dd",
+          "applications": {
+            "zotero": {
+              "strict_min_version": "10.0",
+              "strict_max_version": "10.0.*"
+            }
+          }
         }
       ]
     }
