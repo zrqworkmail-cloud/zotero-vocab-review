@@ -19,8 +19,11 @@ from aqt import gui_hooks, mw
 from aqt.qt import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QTimer, QVBoxLayout,
-    QWidget, QObject, pyqtSignal, Qt, QCursor,
+    QWidget, QObject, pyqtSignal, Qt, QCursor, QSpinBox,
 )
+
+from .background import configure_login_start
+from .review_popup import DesktopReviewController
 
 
 ADDON = __name__
@@ -34,6 +37,12 @@ DEFAULTS = {
     "front_field": "正面",
     "back_field": "解释",
     "confirm_seconds": 8,
+    "review_enabled": True,
+    "review_interval_minutes": 30,
+    "review_position": "corner",
+    "review_mode": "mixed",
+    "review_beautify": True,
+    "review_start_at_login": False,
 }
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
@@ -405,6 +414,7 @@ class Controller:
         self.pending_timer.timeout.connect(self.cancel_pending)
         self.busy = False
         self.last_auto = ("", 0)
+        self.review = DesktopReviewController(settings, api, show_feedback, log_runtime)
 
     def on_event(self, kind):
         log_runtime("controller event: %s" % kind)
@@ -604,6 +614,7 @@ class Controller:
 
     def stop(self):
         self.cancel_pending()
+        self.review.stop()
         self.listener.stop()
 
 
@@ -626,6 +637,25 @@ def open_settings():
         confirm_seconds.addItem("%d 秒" % seconds, seconds)
     confirm_seconds.setCurrentIndex(max(0, confirm_seconds.findData(int(cfg["confirm_seconds"]))))
     shortcut = ShortcutEdit(cfg["modifiers"], cfg["virtual_key"])
+    review_enabled = QCheckBox("定时弹出单词复习")
+    review_enabled.setChecked(bool(cfg["review_enabled"]))
+    review_interval = QSpinBox()
+    review_interval.setRange(5, 240)
+    review_interval.setSuffix(" 分钟")
+    review_interval.setValue(int(cfg["review_interval_minutes"]))
+    review_position = QComboBox()
+    review_position.addItem("屏幕右下角", "corner")
+    review_position.addItem("屏幕中央", "center")
+    review_position.setCurrentIndex(max(0, review_position.findData(cfg["review_position"])))
+    review_mode = QComboBox()
+    review_mode.addItem("选择题与英文填空混合", "mixed")
+    review_mode.addItem("选择题", "choice")
+    review_mode.addItem("英文填空", "typing")
+    review_mode.setCurrentIndex(max(0, review_mode.findData(cfg["review_mode"])))
+    review_beautify = QCheckBox("美化本牌组的 Anki 单词卡")
+    review_beautify.setChecked(bool(cfg["review_beautify"]))
+    review_start_at_login = QCheckBox("Windows 登录时启动 Anki 后台复习")
+    review_start_at_login.setChecked(bool(cfg["review_start_at_login"]))
     form.addRow("收词方式", mode)
     form.addRow("Anki 牌组", deck)
     form.addRow("笔记类型", model)
@@ -633,6 +663,12 @@ def open_settings():
     form.addRow("释义字段", back)
     form.addRow("预览确认有效期", confirm_seconds)
     form.addRow("全局快捷键", shortcut)
+    form.addRow("随身复习", review_enabled)
+    form.addRow("弹出间隔", review_interval)
+    form.addRow("弹出位置", review_position)
+    form.addRow("练习形式", review_mode)
+    form.addRow("卡片外观", review_beautify)
+    form.addRow("后台运行", review_start_at_login)
     form.addRow(QLabel("点击输入框后按组合键。至少需要一个修饰键；支持字母、数字、F1–F24 和常用导航键。"))
     form.addRow(QLabel("自动模式在鼠标拖选后尝试复制选区；会暂存并恢复剪贴板。受保护窗口可能不支持。"))
     buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
@@ -641,27 +677,58 @@ def open_settings():
     form.addRow(buttons)
     if dialog.exec() != QDialog.DialogCode.Accepted:
         return
+    try:
+        configure_login_start(review_start_at_login.isChecked())
+    except Exception as error:
+        show_feedback("开机启动设置失败：%s" % error, period=7000)
+        review_start_at_login.setChecked(False)
     cfg.update({"mode": mode.currentData(), "deck": deck.text().strip(), "model": model.text().strip(),
                 "front_field": front.text().strip(), "back_field": back.text().strip(),
                 "modifiers": shortcut.modifiers, "virtual_key": shortcut.virtual_key,
-                "confirm_seconds": int(confirm_seconds.currentData())})
+                "confirm_seconds": int(confirm_seconds.currentData()),
+                "review_enabled": review_enabled.isChecked(),
+                "review_interval_minutes": review_interval.value(),
+                "review_position": review_position.currentData(),
+                "review_mode": review_mode.currentData(),
+                "review_beautify": review_beautify.isChecked(),
+                "review_start_at_login": review_start_at_login.isChecked()})
     save_settings(cfg)
     controller.stop()
     controller.listener = NativeListener(controller.bridge, cfg)
     controller.listener.start()
+    controller.review.start()
     show_feedback("全局划词设置已保存。", period=5000)
 
 
 def menu_action():
     action = mw.form.menuTools.addAction("全局划词入 Anki 设置…")
     action.triggered.connect(open_settings)
-    return action
+    review_action = mw.form.menuTools.addAction("单词随身复习：立即弹出一张")
+    review_action.triggered.connect(lambda: controller.review.show_next(True))
+    return action, review_action
+
+
+def on_main_window_ready():
+    if settings().get("review_start_at_login", False):
+        try:
+            configure_login_start(True)
+            log_runtime("background review login startup configured")
+        except Exception as error:
+            log_runtime("login startup setup failed: %s" % type(error).__name__)
+            QTimer.singleShot(1000, lambda message=str(error): show_feedback("后台开机启动未能设置：%s" % message, period=7000))
+    if os.environ.pop("ZVR_BACKGROUND_REVIEW", "") == "1":
+        QTimer.singleShot(1500, mw.showMinimized)
 
 
 try:
     controller = Controller()
+    log_runtime("desktop review controller initialized")
     menu_action_ref = menu_action()
+    gui_hooks.card_will_show.append(controller.review.style_card)
+    gui_hooks.profile_did_open.append(controller.review.start)
     gui_hooks.profile_will_close.append(controller.stop)
+    gui_hooks.main_window_did_init.append(on_main_window_ready)
+    QTimer.singleShot(1500, lambda: controller.review.start() if mw.col else None)
 except Exception:
     log_path = os.path.join(tempfile.gettempdir(), "zotero_global_capture_startup_error.txt")
     with open(log_path, "w", encoding="utf-8") as error_log:

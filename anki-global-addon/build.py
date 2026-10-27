@@ -11,7 +11,8 @@ OUTPUT = ROOT / "dist" / "zotero_global_capture.zip"
 
 
 def build():
-    files = sorted(path for path in SOURCE.rglob("*") if path.is_file())
+    files = sorted(path for path in SOURCE.rglob("*")
+                   if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc")
     if not files:
         raise RuntimeError("Anki add-on source directory is empty")
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)

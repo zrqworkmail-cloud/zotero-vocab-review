@@ -32,6 +32,8 @@ The companion Anki add-on in [`anki-global-addon/`](anki-global-addon/) captures
 
 Extract `zotero_global_capture.zip` into `%APPDATA%\Anki2\addons21\`, then restart Anki. In Anki, open **Tools → 全局划词入 Anki 设置…** to choose a capture mode or record a different shortcut. The default shortcut is **Ctrl+Shift+F10**. Preview mode is the default: the first press shows the definition; press again or click Add to confirm.
 
+The same add-on can show a non-modal vocabulary quiz while Anki runs in the background. Choose the interval, screen position, question type, and optional Windows login startup in its settings. Grading uses AnkiConnect and only occurs after a rating is selected. Its optional desktop card styling is scoped to the configured deck and note type; it does not overwrite the shared Anki template. See [the companion guide](anki-global-addon/README.md).
+
 The add-on shows a topmost progress and result notice so feedback remains visible over the source application. Automatic mouse-drag mode is optional and may not work in applications that block copying. See [`anki-global-addon/README.md`](anki-global-addon/README.md) for setup and behavior details.
 
 ## Build

@@ -6,5 +6,11 @@
   "model": "四六级单词模板",
   "front_field": "正面",
   "back_field": "解释",
-  "confirm_seconds": 8
+  "confirm_seconds": 8,
+  "review_enabled": true,
+  "review_interval_minutes": 30,
+  "review_position": "corner",
+  "review_mode": "mixed",
+  "review_beautify": true,
+  "review_start_at_login": false
 }

@@ -1,4 +1,4 @@
-const PLUGIN_VERSION = "0.4.0-beta.7";
+const PLUGIN_VERSION = "0.4.0-beta.8";
 const PLUGIN_ID = "zotero-vocab-review@local";
 const STATUS_PATH = "/vocab-review/status";
 const MENU_ID = "zotero-vocab-review-tools";

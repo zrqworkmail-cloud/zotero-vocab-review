@@ -25,7 +25,7 @@ jobs:
           python -c 'import json,os; assert os.environ["GITHUB_REF_NAME"] == "v" + json.load(open("manifest.json"))["version"]'
           node --check bootstrap.js
           node --test tests/plugin.test.cjs
-          python -m unittest discover -s tests -p 'test_build.py'
+          python -m unittest discover -s tests -p 'test_*.py'
       - name: Build release
         run: |
           python build.py --repository "$GITHUB_REPOSITORY"
