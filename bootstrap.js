@@ -1,4 +1,4 @@
-const PLUGIN_VERSION = "0.4.0-beta.6";
+const PLUGIN_VERSION = "0.4.0-beta.7";
 const PLUGIN_ID = "zotero-vocab-review@local";
 const STATUS_PATH = "/vocab-review/status";
 const MENU_ID = "zotero-vocab-review-tools";
@@ -23,6 +23,9 @@ let popupTimer = null;
 let retryTimer = null;
 let retryInProgress = false;
 let configDetection = null;
+let ankiRecovery = null;
+let ankiPathPicker = null;
+let ankiPathPrompted = false;
 let generation = 0;
 let running = false;
 let lastCaptureAt = null;
@@ -490,23 +493,121 @@ function disableAutoSync() {
   notifyUser("标记自动同步已关闭", "之后的高亮和下划线仍会保存到 Zotero 词库；需要时可手动同步到 Anki。");
 }
 
-async function requestAnki(action, params = {}, endpointOverride = null) {
-  const config = getAnkiConfig();
-  const endpoint = endpointOverride || config.endpoint;
-  const match = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})\/?$/i.exec(endpoint);
-  if (!match || Number(match[1]) < 1 || Number(match[1]) > 65535) {
-    throw new Error("AnkiConnect 地址必须是本机地址，例如 http://127.0.0.1:8765。");
+function getEnvironment(name) {
+  try {
+    const environment = Components.classes["@mozilla.org/process/environment;1"]
+      .getService(Components.interfaces.nsIEnvironment);
+    return environment.get(name) || "";
+  } catch (_) { return ""; }
+}
+
+function existingLauncher(path) {
+  if (!path) return null;
+  try {
+    const file = Zotero.File.pathToFile(path);
+    if (!file.exists()) return null;
+    const appBundle = Zotero.isMac && file.isDirectory() && /\.app$/i.test(file.leafName);
+    return file.isFile() || appBundle ? file : null;
+  } catch (_) { return null; }
+}
+
+function findAnkiStartMenuShortcut(rootPath, depth = 4) {
+  let root;
+  try { root = Zotero.File.pathToFile(rootPath); }
+  catch (_) { return null; }
+  try { if (!root.exists() || !root.isDirectory()) return null; }
+  catch (_) { return null; }
+  const search = (directory, remaining) => {
+    let entries;
+    try { entries = directory.directoryEntries; } catch (_) { return null; }
+    const subdirectories = [];
+    while (entries.hasMoreElements()) {
+      let entry;
+      try { entry = entries.getNext().QueryInterface(Components.interfaces.nsIFile); }
+      catch (_) { continue; }
+      if (entry.isFile() && /anki.*\.lnk$/i.test(entry.leafName)) return entry;
+      if (remaining > 0 && entry.isDirectory()) subdirectories.push(entry);
+    }
+    for (const subdirectory of subdirectories) {
+      const found = search(subdirectory, remaining - 1);
+      if (found) return found;
+    }
+    return null;
+  };
+  return search(root, depth);
+}
+
+function findAnkiLauncher() {
+  const saved = Zotero.Prefs.get(PREF_PREFIX + "ankiExecutablePath", true);
+  const savedFile = existingLauncher(saved);
+  if (savedFile) return savedFile;
+
+  let candidates = [];
+  if (Zotero.isWin) {
+    const appData = getEnvironment("APPDATA");
+    const programData = getEnvironment("PROGRAMDATA");
+    for (const startMenu of [appData, programData].filter(Boolean)) {
+      const shortcut = findAnkiStartMenuShortcut(`${startMenu}\\Microsoft\\Windows\\Start Menu\\Programs`);
+      if (shortcut) return shortcut;
+    }
+    candidates = [
+      `${getEnvironment("LOCALAPPDATA")}\\Programs\\Anki\\anki.exe`,
+      `${getEnvironment("LOCALAPPDATA")}\\Programs\\Anki\\Anki.exe`,
+      `${getEnvironment("LOCALAPPDATA")}\\Anki\\anki.exe`,
+      `${getEnvironment("ProgramFiles")}\\Anki\\anki.exe`,
+      `${getEnvironment("ProgramFiles(x86)")}\\Anki\\Anki.exe`,
+    ];
+  } else if (Zotero.isMac) {
+    const home = getEnvironment("HOME");
+    candidates = ["/Applications/Anki.app", `${home}/Applications/Anki.app`];
+  } else {
+    const home = getEnvironment("HOME");
+    candidates = ["/usr/bin/anki", "/usr/local/bin/anki", `${home}/.local/bin/anki`, `${home}/Applications/Anki/anki`];
   }
+  return candidates.map(existingLauncher).find(Boolean) || null;
+}
+
+async function chooseAnkiExecutable() {
+  if (ankiPathPicker) return ankiPathPicker;
+  if (ankiPathPrompted) {
+    throw new Error("尚未设置 Anki 程序位置。可手动打开 Anki 完成同步；如需再次选择程序，请重启 Zotero 后重试。");
+  }
+  ankiPathPrompted = true;
+  ankiPathPicker = new Promise((resolve, reject) => {
+    try {
+      const picker = Components.classes["@mozilla.org/filepicker;1"]
+        .createInstance(Components.interfaces.nsIFilePicker);
+      picker.init(Zotero.getMainWindow(), "首次启动 Anki：请选择 Anki 程序", Components.interfaces.nsIFilePicker.modeOpen);
+      if (Zotero.isWin) picker.appendFilter("Anki 程序", "*anki*.exe");
+      picker.open(result => {
+        const file = picker.file;
+        if (result !== Components.interfaces.nsIFilePicker.returnOK || !file) {
+          reject(new Error("未选择 Anki 程序。词条已保存在 Zotero，可稍后重试同步。"));
+          return;
+        }
+        if (Zotero.isWin && !/anki.*\.exe$/i.test(file.leafName)) {
+          reject(new Error("请选择 Anki.exe。词条已保存在 Zotero，可稍后重试同步。"));
+          return;
+        }
+        Zotero.Prefs.set(PREF_PREFIX + "ankiExecutablePath", file.path, true);
+        resolve(file);
+      });
+    } catch (error) { reject(error); }
+  }).finally(() => { ankiPathPicker = null; });
+  return ankiPathPicker;
+}
+
+async function requestAnkiHTTP(action, params, endpoint, timeout = 5000) {
   let xhr;
   try {
     xhr = await Zotero.HTTP.request("POST", endpoint, {
       body: JSON.stringify({ action, version: 6, params }),
       headers: { "Content-Type": "application/json" },
       responseType: "text",
-      timeout: 5000,
+      timeout,
     });
   } catch (_) {
-    const error = new Error("无法连接 AnkiConnect；请确认 Anki 正在运行并已安装 AnkiConnect。");
+    const error = new Error("无法连接 AnkiConnect。");
     error.ankiUnavailable = true;
     throw error;
   }
@@ -521,6 +622,52 @@ async function requestAnki(action, params = {}, endpointOverride = null) {
   }
   if (response.error) throw new Error(response.error);
   return response.result;
+}
+
+async function ensureAnkiAvailable(endpoint) {
+  if (ankiRecovery) return ankiRecovery;
+  ankiRecovery = (async () => {
+    let launcher = findAnkiLauncher();
+    if (!launcher) launcher = await chooseAnkiExecutable();
+    notifyUser("正在启动 Anki", "检测到 Anki 未运行；启动后会自动重试同步。");
+    try { Zotero.launchFile(launcher.path); }
+    catch (error) { throw new Error(`启动 Anki 失败：${error.message || error}`); }
+
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      try {
+        await requestAnkiHTTP("version", {}, endpoint, 1500);
+        return;
+      } catch (error) {
+        if (!error.ankiUnavailable) throw error;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    throw new Error("Anki 已启动，但等待 30 秒后仍无法连接 AnkiConnect。请确认 AnkiConnect 已安装并启用；本次词条仍保存在 Zotero，可稍后重试同步。");
+  })().finally(() => { ankiRecovery = null; });
+  return ankiRecovery;
+}
+
+async function requestAnki(action, params = {}, endpointOverride = null) {
+  const config = getAnkiConfig();
+  const endpoint = endpointOverride || config.endpoint;
+  const match = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})\/?$/i.exec(endpoint);
+  if (!match || Number(match[1]) < 1 || Number(match[1]) > 65535) {
+    throw new Error("AnkiConnect 地址必须是本机地址，例如 http://127.0.0.1:8765。");
+  }
+  try {
+    return await requestAnkiHTTP(action, params, endpoint);
+  } catch (error) {
+    if (!error.ankiUnavailable) throw error;
+    await ensureAnkiAvailable(endpoint);
+    try { return await requestAnkiHTTP(action, params, endpoint); }
+    catch (retryError) {
+      if (retryError.ankiUnavailable) {
+        retryError.message = `Anki 已启动，但仍无法连接 AnkiConnect。请确认 AnkiConnect 已启用；${retryError.message}`;
+      }
+      throw retryError;
+    }
+  }
 }
 
 function buildBack(entry, existingBack = "") {

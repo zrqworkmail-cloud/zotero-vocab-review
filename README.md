@@ -16,7 +16,7 @@ When the detected note type has these exact field names, the plugin fills them a
 
 ## Settings
 
-Open Zotero's **Edit → Settings → Zotero 划词同步到 Anki** page to configure automatic Anki sync, review popups, notification duration, and AnkiConnect deck/note fields. The “权威例句” field includes a document sentence formatted as `“Sentence.” —— Author (Year). Paper title (p. 12)`.
+Open Zotero's **Edit → Settings → Zotero 划词同步到 Anki** page to configure automatic Anki sync, review popups, notification duration, and AnkiConnect deck/note fields. If Anki is closed when a word is synced, the plugin tries its Start Menu shortcut or a standard install location, waits for AnkiConnect, and retries. This works across computers with standard installations; if it cannot locate Anki, it asks once for the program and remembers that computer's path. The “权威例句” field includes a document sentence formatted as `“Sentence.” —— Author (Year). Paper title (p. 12)`.
 
 Other fields such as `词根`, `近义词`, and `英语发音` are left empty when no verified source data is available. Document examples are extracted locally from the PDF text already available to Zotero and are not sent to Youdao. Dictionary failures do not block word capture or Anki sync. If an exact matching note already exists without this plugin tag, the plugin adopts it, preserves its existing explanation and deck, and fills only empty optional fields; new literature examples are appended to `权威例句` without replacing existing content.
 
