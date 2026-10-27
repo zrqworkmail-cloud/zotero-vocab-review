@@ -35,7 +35,9 @@ jobs:
         run: |
           extra=()
           if [[ "$GITHUB_REF_NAME" == *-beta.* ]]; then extra+=(--prerelease); fi
-          gh release create "$GITHUB_REF_NAME" dist/*.xpi dist/SHA256SUMS#zotero-vocab-review-SHA256SUMS anki-global-addon/dist/zotero_global_capture.zip anki-global-addon/dist/SHA256SUMS#anki-global-addon-SHA256SUMS --verify-tag --title "$GITHUB_REF_NAME" --notes-file docs/RELEASE_NOTES.md "${extra[@]}"
+          cp dist/SHA256SUMS dist/zotero-vocab-review-SHA256SUMS
+          cp anki-global-addon/dist/SHA256SUMS anki-global-addon/dist/anki-global-addon-SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" dist/*.xpi dist/zotero-vocab-review-SHA256SUMS anki-global-addon/dist/zotero_global_capture.zip anki-global-addon/dist/anki-global-addon-SHA256SUMS --verify-tag --title "$GITHUB_REF_NAME" --notes-file docs/RELEASE_NOTES.md "${extra[@]}"
       - name: Publish update feeds after release assets exist
         shell: bash
         run: |
