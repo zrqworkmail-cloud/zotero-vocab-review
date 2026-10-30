@@ -8,3 +8,8 @@ __pycache__/
 *.log
 *.sqlite*
 *.xpi
+
+# Local deployment artifacts: absolute machine paths, process ids, health counts
+# and a backup of the user's Zotero profile startup file. Never publish these.
+/deployment-backups/
+/DEPLOYMENT-*.json
