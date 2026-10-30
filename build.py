@@ -12,11 +12,11 @@ FILES = ('manifest.json', 'bootstrap.js', 'lemma-data.js', 'prefs.xhtml', 'prefs
 def build_release(root, repository, output):
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
         raise ValueError('Repository must be owner/name')
-    manifest = json.loads((root / 'manifest.json').read_text())
+    manifest = json.loads((root / 'manifest.json').read_text(encoding='utf-8'))
     version = manifest['version']
     if not re.fullmatch(r'\d+\.\d+\.\d+(?:-beta\.\d+)?', version):
         raise ValueError('Expected x.y.z or x.y.z-beta.n version')
-    if f'const PLUGIN_VERSION = "{version}";' not in (root / 'bootstrap.js').read_text():
+    if f'const PLUGIN_VERSION = "{version}";' not in (root / 'bootstrap.js').read_text(encoding='utf-8'):
         raise ValueError('Source and manifest versions differ')
     feed = 'updates-beta.json' if '-beta.' in version else 'updates.json'
     manifest['homepage_url'] = f'https://github.com/{repository}'
@@ -32,11 +32,12 @@ def build_release(root, repository, output):
             info.external_attr = 0o100644 << 16
             archive.writestr(info, data)
     digest = hashlib.sha256(package.read_bytes()).hexdigest()
-    (output / 'SHA256SUMS').write_text(f'{digest}  {package.name}\n')
+    (output / 'SHA256SUMS').write_text(f'{digest}  {package.name}\n', encoding='utf-8')
     update = {'version': version, 'update_link': f'https://github.com/{repository}/releases/download/v{version}/{package.name}',
               'update_hash': f'sha256:{digest}', 'applications': {'zotero': {
                   key: compatibility[key] for key in ('strict_min_version', 'strict_max_version')}}}
-    (output / feed).write_text(json.dumps({'addons': {compatibility['id']: {'updates': [update]}}}, indent=2) + '\n')
+    (output / feed).write_text(json.dumps({'addons': {compatibility['id']: {'updates': [update]}}}, indent=2) + '\n',
+                               encoding='utf-8')
     return package
 
 
