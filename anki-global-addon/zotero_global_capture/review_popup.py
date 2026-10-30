@@ -13,7 +13,7 @@ from aqt.qt import (
     QPainter, QPushButton, QScrollArea, QStyle, QTimer, QUrl, QVBoxLayout, QWidget, pyqtSignal, Qt,
 )
 
-from .review_logic import (answer_matches, clean_detail, clean_text, cloze_sentence, collection_plan, example_groups, exam_word_labels, format_meaning, link_example_html, literature_example_html, masked_example, mask_answer_clues, meaning_table, next_check_delay, root_detail_html,
+from .review_logic import (answer_matches, clean_detail, clean_text, cloze_sentence, collection_plan, end_of_session_reason, example_groups, exam_word_labels, format_meaning, link_example_html, literature_example_html, masked_example, mask_answer_clues, meaning_table, next_check_delay, plan_limits_new, root_detail_html,
                            next_hint_index, prepare_question, session_batch_size, should_style_card, spelling_hint, spoken_examples, submit_review, suggested_ease, today_remaining, updated_session_target, window_wait)
 from . import morphology, word_relations
 from .input_mode import ReviewInputMode
@@ -1344,16 +1344,19 @@ class DesktopReviewController:
                 if new_group:
                     target = session_batch_size(cfg, current_plan, manual=True)
                 self.signals.saved.emit(dialog, generation)
+                limits_new = plan_limits_new(cfg)
                 try:
                     next_question = prepare_question(self.api, cfg, cfg.get('review_mode', 'mixed'),
-                                                     due_only=bool(current_plan is not None and current_plan['new_remaining'] <= 0))
+                                                     due_only=bool(limits_new and current_plan is not None and
+                                                                   current_plan['new_remaining'] <= 0))
                     if next_question:
                         next_question['_today_remaining'] = today_remaining(current_plan) if current_plan else None
                         next_question['_new_group'] = new_group
-                    next_result = (next_question, None, target, new_group)
+                    next_result = (next_question, None, target, new_group,
+                                   None if next_question else end_of_session_reason(current_plan, limits_new))
                 except Exception as error:
                     self.log('review preparation failed: %s' % type(error).__name__)
-                    next_result = (None, str(error), target, False)
+                    next_result = (None, str(error), target, False, None)
                 self.signals.graded.emit(dialog, None, generation, next_result)
             except Exception as error:
                 self.log('review grading failed: %s' % type(error).__name__)
@@ -1410,9 +1413,11 @@ class DesktopReviewController:
         if generation == self.generation and self.dialog is dialog:
             if not error:
                 self.log('review rating saved')
+                end_reason = None
                 if next_result and len(next_result) > 2:
                     self.session_target = next_result[2] if next_result[0] else len(self.session_seen) + 1
                     new_group = len(next_result) > 3 and next_result[3]
+                    end_reason = next_result[4] if len(next_result) > 4 else None
                     next_result = next_result[:2] if next_result[0] or next_result[1] else None
                 else:
                     new_group = False
@@ -1433,6 +1438,8 @@ class DesktopReviewController:
                 self.prepared_next = next_result
                 if next_result and next_result[1]:
                     self.feedback('复习结果已保存，但下一张准备失败。')
+                elif not next_result and end_reason:
+                    self.feedback(end_reason)
             dialog.grade_result(error)
 
     def style_card(self, text, card, kind):

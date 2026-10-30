@@ -507,6 +507,23 @@ def today_remaining(plan):
     return max(0, int(plan['goal']) - int(plan['done']))
 
 
+def plan_limits_new(cfg):
+    """Only the automatic plan may declare today's new words spent.
+
+    A fixed group size is the user's own choice; the deadline-derived daily estimate
+    must not silently stop a session after a single card.
+    """
+    return cfg.get('review_plan_mode') == 'daily'
+
+
+def end_of_session_reason(plan, limits_new):
+    """Say why nothing further can be shown instead of closing the card silently."""
+    if limits_new and plan is not None and int(plan.get('new_remaining', 0)) <= 0:
+        return ('本组结束：今天的新词计划已完成，剩下的都是到期复习词。' if plan.get('due')
+                else '本组结束：今天的新词计划已完成，也没有到期复习词。')
+    return '本组结束：已选题型下没有更多可弹出的卡片，可能是牌组当日新词额度已用完。'
+
+
 def review_decks(cfg):
     selected = cfg.get('review_extra_decks')
     if not isinstance(selected, list):

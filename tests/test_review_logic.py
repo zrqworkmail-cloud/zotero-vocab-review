@@ -121,6 +121,25 @@ class ReviewLogicTests(unittest.TestCase):
         date = datetime.date(2026, 10, 30)
         self.assertEqual(logic.study_plan(date, '', 0, 8, 0, 0, 8, 15)['batch'], 3)
         self.assertEqual(logic.study_plan(date, '', 0, 1, 0, 0, 8, 15)['batch'], 1)
+
+    def test_fixed_group_mode_is_not_capped_by_the_deadline_plan(self):
+        # 12 new words spread over 44 days only suggests 1 word per day; that estimate
+        # must not end a session the user sized at 3 cards per group.
+        plan = logic.study_plan(datetime.date(2026, 10, 30), '2026-12-12', 12, 0, 0, 1, 7, 15, 1)
+        self.assertEqual((plan['goal'], plan['new_remaining']), (1, 0))
+        self.assertTrue(logic.plan_limits_new({'review_plan_mode': 'daily'}))
+        self.assertFalse(logic.plan_limits_new({'review_plan_mode': 'fixed'}))
+
+    def test_end_of_session_reason_names_the_real_cause(self):
+        spent = {'new_remaining': 0, 'due': 0}
+        self.assertIn('没有到期复习', logic.end_of_session_reason(spent, True))
+        self.assertIn('到期复习词', logic.end_of_session_reason({'new_remaining': 0, 'due': 3}, True))
+        # In fixed mode the plan is not the cause, so it must not be blamed for it.
+        fixed = logic.end_of_session_reason(spent, False)
+        self.assertIn('当日新词额度', fixed)
+        self.assertNotIn('计划已完成', fixed)
+        self.assertIn('当日新词额度', logic.end_of_session_reason(None, True))
+
     def test_exam_labels_are_based_on_actual_wordlist_membership(self):
         labels = logic.exam_word_labels('increases')
         self.assertIn('四级词表', labels)

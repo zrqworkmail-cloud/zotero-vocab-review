@@ -43,7 +43,9 @@ ctl._grade(dlg,3)
 for _ in range(100):
  app.processEvents();QTest.qWait(5)
  if got:break
-assert got and got[0][0] is None and got[0][1][0]['_new_group'] and got[0][1][2:]==(2,True),got
+assert got and got[0][0] is None and got[0][1][0]['_new_group'] and got[0][1][2:4]==(2,True),got
+# a card was produced, so the "why did the session end" slot must stay empty
+assert len(got[0][1])==5 and got[0][1][4] is None,got
 finished=DesktopReviewController(lambda:{},lambda *_:None,lambda *_:None,lambda *_:None)
 finished.session_target=1;events=[];finished.schedule=lambda **kw:events.append('schedule')
 finished.show_next=lambda *a,**kw:events.append('next')
