@@ -125,7 +125,7 @@ class ReviewLogicTests(unittest.TestCase):
         label = logic.scope_label(dict(CFG, review_scope_decks=['四级词书'],
                                        review_scope_tags=['zvr_cet4_core']))
         self.assertEqual(label, '四级词书 · cet4_core')
-        self.assertEqual(logic.scope_label(dict(CFG)), '所选牌组')
+        self.assertEqual(logic.scope_label(dict(CFG)), '')
         # A deck the collection no longer has must not end up on the card.
         self.assertEqual(logic.scope_label(dict(CFG, review_scope_decks=['gone', 'live']),
                                            deck_names={'live'}).replace(' · ', ''), 'live')

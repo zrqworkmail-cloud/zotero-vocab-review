@@ -370,7 +370,9 @@ def scope_label(cfg, deck_names=None):
         parts.append('、'.join(decks[:2]) + ('' if len(decks) <= 2 else ' 等 %d 个牌组' % len(decks)))
     if tags:
         parts.append('、'.join(tags[:2]) + ('' if len(tags) <= 2 else ' 等 %d 个标签' % len(tags)))
-    return ' · '.join(parts) or '所选牌组'
+    # Empty when nothing was picked: a placeholder like 所选牌组 on every card is
+    # noise, not information. Callers that need a label of their own decide it.
+    return ' · '.join(parts)
 
 
 def _search(cfg, all_decks=False):

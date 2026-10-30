@@ -14,7 +14,7 @@ from aqt.qt import (
 )
 
 from .review_logic import (answer_matches, clean_detail, clean_text, cloze_sentence, collection_plan, end_of_session_reason, example_groups, exam_word_labels, format_meaning, link_example_html, literature_example_html, masked_example, mask_answer_clues, meaning_table, next_check_delay, plan_limits_new, root_detail_html,
-                           next_hint_index, prepare_question, session_batch_size, should_style_card, spelling_hint, spoken_examples, submit_review, suggested_ease, today_remaining, updated_session_target, window_wait)
+                           next_hint_index, prepare_question, scope_label, session_batch_size, should_style_card, spelling_hint, spoken_examples, submit_review, suggested_ease, today_remaining, updated_session_target, window_wait)
 from . import morphology, word_relations
 from .input_mode import ReviewInputMode
 
@@ -265,7 +265,12 @@ class ReviewDialog(QDialog):
         layout.setContentsMargins(26, 22, 26, 22)
         layout.setSpacing(10)
         top = QHBoxLayout()
-        eyebrow = _plain_label('VOCABULARY  ·  %s' % ('新词' if question['kind'] == 'new' else '到期复习'), 'eyebrow')
+        # The card must say which slice of the collection it came from, so a 四级 and
+        # a 六级 session are tellable at a glance.
+        scope = str(scope_label(self.cfg) or '').strip()
+        kind_text = '新词' if question['kind'] == 'new' else '到期复习'
+        eyebrow = _plain_label('VOCABULARY  ·  %s%s' % (('%s  ·  ' % scope) if scope else '', kind_text), 'eyebrow')
+        eyebrow.setToolTip('学习范围：%s' % (scope or '所选牌组'))
         eyebrow.setWordWrap(False)
         top.addWidget(eyebrow, 1)
         menu_button = QPushButton('...')
