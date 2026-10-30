@@ -366,6 +366,8 @@ class ReviewDialog(QDialog):
         self.letter_boxes = []
         self.letter_positions = [(i, c) for i, c in enumerate(self.answer_form) if c.isalpha()]
         self.choice_buttons = []
+        self.spoken_answer_button = None
+        self.spoken_unknown_button = None
         self.hint_label = None
         self.hint_button = None
         self.letter_label = None
@@ -474,6 +476,8 @@ class ReviewDialog(QDialog):
             self.status.setText('空格：字母提示；回车：检查拼写或朗读单词。')
             if mode == 'listening':
                 self.status.setText('点击播放或按回车重听；需要时可查看释义或字母提示。')
+        elif self.spoken_answer_button is not None:
+            self.status.setText('回车：我已说出，查看答案。空格：想不起来，显示答案。')
         layout.addWidget(self.status)
         self.grade_widget = QWidget()
         grade_layout = QHBoxLayout(self.grade_widget)
@@ -515,6 +519,15 @@ class ReviewDialog(QDialog):
                 QTimer.singleShot(0, self.play_listening_prompt)
         elif self.choice_buttons:
             QTimer.singleShot(0, self.focus_choices)
+        elif self.spoken_answer_button is not None:
+            QTimer.singleShot(0, self.focus_spoken)
+
+    def focus_spoken(self):
+        # Without this, a speaking card leaves focus on the '...' menu button and
+        # Enter opens the card menu instead of answering.
+        if self.isVisible() and not self.answer_shown:
+            self.activateWindow()
+            self.spoken_answer_button.setFocus()
 
     def focus_choices(self):
         if self.isVisible() and not self.answer_shown:
@@ -717,6 +730,23 @@ class ReviewDialog(QDialog):
             return True
         return super().eventFilter(watched, event)
 
+    def keyPressEvent(self, event):
+        # The speaking card has no letter boxes and no choice buttons, so the dialog
+        # itself receives keys: Enter means "I said it, show me", Space means "I could
+        # not recall it". The event filter is only installed for choice modes, so this
+        # cannot live there.
+        if (self.question['mode'] == 'speaking' and not self.answer_shown
+                and event.modifiers() == Qt.KeyboardModifier.NoModifier):
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.spoken_answer_button.click()
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_Space:
+                self.spoken_unknown_button.click()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
     def reveal(self, correct):
         if self.answer_shown:
             return
@@ -737,7 +767,7 @@ class ReviewDialog(QDialog):
                 self.phonetic_label.hide()
             if hasattr(self, 'judgment_label'):
                 self.judgment_label.hide()
-            if hasattr(self, 'spoken_answer_button'):
+            if self.spoken_answer_button is not None:
                 self.spoken_answer_button.hide()
                 self.spoken_unknown_button.hide()
             if self.letter_boxes:
