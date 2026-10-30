@@ -132,6 +132,12 @@ class ClickAwayFilter(QObject):
         self.popup = popup
 
     def eventFilter(self, watched, event):
+        # An embedded card lives inside the host window, so the host and its leftover
+        # widgets are not "outside the card"; treating them as outside rejected the
+        # active card on any click that landed on the host. The host keeps its own
+        # filter, so a real click outside the window still ends the session.
+        if getattr(self.popup, '_embedded', False):
+            return False
         if (self.popup.isVisible() and event.type() == QEvent.Type.MouseButtonPress and
                 isinstance(watched, QWidget) and watched is not self.popup and
                 not self.popup.isAncestorOf(watched)):
@@ -1133,6 +1139,12 @@ class DesktopReviewController:
             self._lookup_relations(self.dialog, dict(cfg))
             if previous is not None:
                 host._embedded_dialog = self.dialog
+                # The new card only paints over the host; the outgoing card's widgets
+                # stayed live underneath, so overlapping pixels hit-tested to them and
+                # the window looked frozen. Hide everything that is not the new card.
+                for widget in host.findChildren(QWidget):
+                    if widget is not self.dialog and not self.dialog.isAncestorOf(widget):
+                        widget.hide()
             return True
         except Exception as error:
             self.dialog = previous
