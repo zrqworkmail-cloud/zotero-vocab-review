@@ -11,6 +11,17 @@ app=QApplication([]);app.setStyle('Fusion');app.setStyleSheet('QGroupBox { backg
 for f in (r'C:\Windows\Fonts\segoeui.ttf',r'C:\Windows\Fonts\msyh.ttc'):QFontDatabase.addApplicationFont(f)
 app.setFont(QFont('Microsoft YaHei',10))
 palette=app.palette();palette.setColor(QPalette.ColorRole.Window,QColor('#242424'));palette.setColor(QPalette.ColorRole.WindowText,QColor('#eeeeee'));app.setPalette(palette)
+
+# PyQt6 aborts the process with no traceback when a slot raises, so assertions inside
+# these callbacks report through check() instead of `assert`.
+failures=[]
+def check(ok, detail):
+	if not ok: failures.append(detail)
+	return bool(ok)
+
+def dialog_now():
+	return next(w for w in app.topLevelWidgets() if isinstance(w,QDialog) and w.isVisible())
+
 class Decks:
  def all_names_and_ids(self,include_filtered=False):return [types.SimpleNamespace(name=x) for x in ('文献单词','四六级单词','四六级核心词汇')]
 class Models:
@@ -30,12 +41,16 @@ validate_windows=logic.validate_windows
 window_minutes=logic.window_minutes
 fetch_cet=lambda: '2026-12-12'
 mw.col.find_cards=lambda query: []
+LOCAL_TAGS=['anki_global_capture','zvr_kyle_cet4','zvr_kyle_cet6','zvr_cet6_full','工作/学习']
+local_tags=lambda: list(LOCAL_TAGS)
 class ShortcutEdit(QLineEdit):
  feedback=pyqtSignal(str)
  def __init__(self,m,v):super().__init__('Ctrl+Shift+F10');self.modifiers=m;self.virtual_key=v;self.valid=True
 path=os.path.join(source,'__init__.py')
 tree=ast.parse(open(path,encoding='utf-8').read());node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='open_settings');module=ast.Module(body=[node],type_ignores=[])
-scope=globals();scope.update(settings=lambda:dict(cfg),show_feedback=lambda *_a,**_k:None,format_shortcut=lambda *_:'Ctrl+Shift+F10')
+scope=globals();scope.update(settings=lambda:dict(cfg),show_feedback=lambda *_a,**_k:None,format_shortcut=lambda *_:'Ctrl+Shift+F10',
+	BOOK_TAGS=logic.BOOK_TAGS,local_tags=local_tags,scope_decks=logic.scope_decks,scope_tags=logic.scope_tags,scope_uses_all_decks=logic.scope_uses_all_decks,
+	dialog_now=dialog_now,check=check,failures=failures)
 exec(compile(module,path,'exec'),scope)
 
 import types,sys
@@ -44,43 +59,106 @@ theme=types.ModuleType('aqt.theme');theme.theme_manager=types.SimpleNamespace(ni
 sys.modules['aqt']=aqt;sys.modules['aqt.theme']=theme
 
 
-cfg.update(deck='四六级核心词汇',review_core_enabled=True,review_extra_decks=['四六级核心词汇','文献单词'])
+def tag_boxes(d):
+ return d.findChild(QWidget,'reviewScopeTags').findChildren(QCheckBox)
+
+def deck_boxes(d):
+ return d.findChild(QWidget,'reviewExtraDeck').findChildren(QCheckBox)
+
+def save_button(d):
+ return d.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save)
+
+def open_and(act):
+ QTimer.singleShot(100,act);open_settings(QWidget())
+
 saved=[]
 scope.update(save_settings=lambda data:saved.append(dict(data)),controller=types.SimpleNamespace(listener=types.SimpleNamespace(registered=True,registration_error=''),review=types.SimpleNamespace(dialog=object(),start=lambda:None)))
-def inspect_and_save():
- d=next(w for w in app.topLevelWidgets() if isinstance(w,QDialog) and w.isVisible())
- assert d.findChild(QComboBox,'reviewBook').findData('cet4_kyle') >= 0
- assert d.findChild(QComboBox,'reviewBook').findData('cet6_kyle') >= 0
- checks=d.findChild(QWidget,'reviewExtraDeck').findChildren(QCheckBox)
- core=next(x for x in checks if x.property('deckName')=='四六级核心词汇')
- assert core.isChecked() and not core.isEnabled() and '主牌组' in core.text()
- d.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save).click()
-QTimer.singleShot(100,inspect_and_save);open_settings(QWidget())
-assert saved and saved[0]['review_core_enabled'] and '四六级核心词汇' in saved[0]['review_extra_decks']
-cfg.update(saved[0]);QTimer.singleShot(100,inspect_and_save);open_settings(QWidget())
-assert len(saved)==2
-def choose_main():
- d=next(w for w in app.topLevelWidgets() if isinstance(w,QDialog) and w.isVisible())
- main=d.findChild(QComboBox,'mainReviewDeck');main.setCurrentIndex(main.findData('四六级单词'))
- checks=d.findChild(QWidget,'reviewExtraDeck').findChildren(QCheckBox)
- selected=next(x for x in checks if x.property('deckName')=='四六级单词')
- assert selected.isChecked() and not selected.isEnabled()
- d.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save).click()
-QTimer.singleShot(100,choose_main);open_settings(QWidget())
-assert saved[-1]['review_main_deck']=='四六级单词' and saved[-1]['deck']=='四六级核心词汇'
-cfg.update(saved[-1])
-def inspect_main():
- d=next(w for w in app.topLevelWidgets() if isinstance(w,QDialog) and w.isVisible())
- assert d.findChild(QComboBox,'mainReviewDeck').currentData()=='四六级单词'
- d.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save).click()
-QTimer.singleShot(100,inspect_main);open_settings(QWidget())
-cfg.update(review_extra_decks=['missing deck'], review_main_deck='四六级核心词汇')
-def choose_book():
- d=next(w for w in app.topLevelWidgets() if isinstance(w,QDialog) and w.isVisible())
- book=d.findChild(QComboBox,'reviewBook');book.setCurrentIndex(book.findData('cet6_kyle'))
- save=d.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save)
- assert save.isEnabled()
- save.click()
-QTimer.singleShot(100,choose_book);open_settings(QWidget())
-assert saved[-1]['review_book']=='cet6_kyle' and 'missing deck' in saved[-1]['review_extra_decks']
-print('Qt: core main deck stays selected on save and reopen')
+
+# 1. The hardcoded book combo is gone, tags come from the collection, and a saved
+#    legacy book reappears as its tag already ticked rather than being dropped.
+cfg.update(deck='四六级核心词汇',review_core_enabled=True,review_extra_decks=['四六级核心词汇','文献单词'],
+	review_book='cet6_kyle',review_scope_decks=[],review_scope_tags=[],review_tags_all=False,review_scope_name='')
+def inspect_first():
+ d=dialog_now()
+ check(d.findChild(QComboBox,'reviewBook') is None,'the hardcoded 复习词书 combo should be gone')
+ check([x.property('tagName') for x in tag_boxes(d)]==sorted(LOCAL_TAGS),'tags must be read from the collection')
+ checked=sorted(x.property('tagName') for x in tag_boxes(d) if x.isChecked())
+ check(checked==['zvr_kyle_cet6'],'legacy book must map to its tag, got %s' % checked)
+ core=next(x for x in deck_boxes(d) if x.property('deckName')=='四六级核心词汇')
+ check(core.isChecked() and not core.isEnabled() and '主牌组' in core.text(),'main deck must stay selected and locked')
+ save_button(d).click()
+open_and(inspect_first)
+check(bool(saved) and saved[-1]['review_core_enabled'],'save must keep the core-word preference')
+check(saved[-1]['review_book']=='' and saved[-1]['review_scope_tags']==['zvr_kyle_cet6'],'legacy book must migrate into scope tags')
+check(saved[-1]['review_scope_decks']==['四六级核心词汇','文献单词'],'scope decks must be written on save')
+
+# 2. Reopening restores the selection; a tag with a slash, the match mode and the
+#    display name all round-trip.
+cfg.update(saved[0]);saved.clear()
+def pick_tags():
+ d=dialog_now()
+ checked=sorted(x.property('tagName') for x in tag_boxes(d) if x.isChecked())
+ check(checked==['zvr_kyle_cet6'],'reopen must restore saved tags, got %s' % checked)
+ next(x for x in tag_boxes(d) if x.property('tagName')=='zvr_kyle_cet4').setChecked(True)
+ next(x for x in tag_boxes(d) if x.property('tagName')=='工作/学习').setChecked(True)
+ d.findChild(QLineEdit,'reviewScopeName').setText('四级 + 六级')
+ d.findChild(QComboBox,'reviewTagsMatch').setCurrentIndex(1)
+ save_button(d).click()
+open_and(pick_tags)
+check(sorted(saved[-1]['review_scope_tags'])==['zvr_kyle_cet4','zvr_kyle_cet6','工作/学习'],'tag selection must save, got %s' % saved[-1]['review_scope_tags'])
+check(saved[-1]['review_tags_all'] is True and saved[-1]['review_scope_name']=='四级 + 六级','match mode and name must round-trip')
+
+# 3. With the new keys in place, a stale legacy review_extra_decks entry is not
+#    consulted, so it must not block saving nor show up as a phantom checkbox.
+cfg.update(saved[-1]);cfg.update(review_extra_decks=['missing deck']);saved.clear()
+def stale_legacy():
+ d=dialog_now()
+ check('missing deck' not in [x.property('deckName') for x in deck_boxes(d)],'a superseded legacy deck must not reappear in the list')
+ check(save_button(d).isEnabled(),'stale legacy extras alone must not block saving')
+ save_button(d).click()
+open_and(stale_legacy)
+check(bool(saved) and saved[-1]['review_scope_name']=='四级 + 六级','saving must still work')
+
+# 4. A deck missing from the collection *inside the new scope* must be listed, marked,
+#    and block saving, or the user studies a scope that is not there.
+cfg.update(saved[-1]);cfg.update(review_scope_decks=['四六级核心词汇','已删除的牌组']);saved.clear()
+def stale_scope():
+ d=dialog_now()
+ ghost=next((x for x in deck_boxes(d) if x.property('deckName')=='已删除的牌组'),None)
+ check(ghost is not None,'a missing deck in scope must still be listed')
+ check(ghost is not None and '未找到' in ghost.text(),'it must be marked 未找到, got %r' % (ghost and ghost.text()))
+ # Tags carry the scope, so a dead deck among them is tolerated but must be shown.
+ check(ghost is not None and save_button(d).isEnabled(),'with tags in scope a dead deck is tolerated, not fatal')
+ d.reject()
+open_and(stale_scope)
+
+# 5. Without tags the decks alone define the scope, so a dead one has to block saving.
+cfg.update(review_scope_tags=[], review_tags_all=False)
+def stale_scope_no_tags():
+ d=dialog_now()
+ ghost=next((x for x in deck_boxes(d) if x.property('deckName')=='已删除的牌组'),None)
+ check(ghost is not None and not save_button(d).isEnabled(),'a dead deck must block saving when no tags carry the scope')
+ d.reject()
+open_and(stale_scope_no_tags)
+
+# 6. A scope that was saved as "all decks, filtered by tag" must come back that way,
+#    with the now-meaningless deck list visibly disabled rather than silently applied.
+cfg.update(review_scope_decks=[], review_scope_tags=['zvr_kyle_cet4'], review_tags_all=False, review_scope_name='')
+def cross_deck():
+	 d=dialog_now()
+	 box=d.findChild(QCheckBox,'reviewAllDecks')
+	 check(box is not None and box.isChecked(),'an explicit cross-deck scope must reopen with 不限牌组 ticked')
+	 check(all(not x.isEnabled() for x in deck_boxes(d)),'deck choices are meaningless in cross-deck mode, so they must look disabled')
+	 box.setChecked(False)
+	 check(all(x.isEnabled() for x in deck_boxes(d) if '主牌组' not in x.text()),'unticking it must give the decks back')
+	 box.setChecked(True)
+	 save_button(d).click()
+open_and(cross_deck)
+check(saved[-1]['review_scope_decks']==[],'cross-deck mode must save an empty deck list')
+check(saved[-1]['review_scope_tags']==['zvr_kyle_cet4'],'cross-deck mode must keep its tag')
+
+if failures:
+ print('FAIL')
+ for f in failures: print('  -', f)
+ sys.exit(1)
+print('Qt: study scope reads from the collection, migrates the legacy book, and reports a missing in-scope deck')

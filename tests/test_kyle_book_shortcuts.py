@@ -20,7 +20,12 @@ class ShortcutTests(unittest.TestCase):
   env['add_review_to_toolbar'](links,toolbar)
   self.assertEqual([x[1] for x in links],['单词复习','四级词书','六级词书'])
   links[1][2]();links[2][2]()
-  self.assertEqual([x['review_book'] for x in saved],['cet4_kyle','cet6_kyle'])
+  # The book buttons now write the same deck+tag scope as the settings dialog instead of
+  # the old parallel 词书 key, and they scope by tag across all decks.
+  self.assertEqual([x['review_book'] for x in saved],['',''])
+  self.assertEqual([x['review_scope_decks'] for x in saved],[[],[]])
+  self.assertEqual([x['review_scope_tags'] for x in saved],[['zvr_kyle_cet4'],['zvr_kyle_cet6']])
+  self.assertEqual([x['review_scope_name'] for x in saved],['四级词书','六级词书'])
   self.assertIn('tag:zvr_kyle_cet4',queries[0]);self.assertIn('tag:zvr_kyle_cet6',queries[1])
   review.dialog=object();links[1][2]();self.assertEqual(len(saved),2);self.assertEqual(shown,[True,True])
 if __name__=='__main__':unittest.main()
