@@ -1,7 +1,6 @@
 {
   "manifest_version": 2,
-  "name": "Zotero Vocabulary Review",
-  "version": "0.4.0-beta.8",
+  "version": "0.4.0-beta.10",
   "name": "Zotero 划词同步到 Anki",
   "description": "Capture Zotero PDF highlights, review vocabulary, and sync notes to Anki.",
   "author": "Ruoquan Zhou",

@@ -2,6 +2,32 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createHarness } = require('./harness.cjs');
 
+test('captures inflections under their unambiguous lemma and keeps the observed forms', async () => {
+  const h = createHarness();
+  h.annotation(1, 'leveraging');
+  await h.run('captureAnnotation(1)'); await h.settle();
+  h.annotation(2, 'leverage');
+  await h.run('captureAnnotation(2)'); await h.settle();
+  const entry = h.getData().leverage;
+  assert.equal(entry.word, 'leverage');
+  assert.equal(entry.count, 2);
+  assert.deepEqual(entry.surfaceForms, ['leveraging', 'leverage']);
+  assert.equal(h.getData().leveraging, undefined);
+  assert.equal(h.notes.size, 1);
+  assert.equal([...h.notes.values()][0].fields.Front.value, 'leverage');
+  assert.ok(h.notifications.some(n => /文献词形：leveraging；原形：leverage/.test(n.details)));
+});
+
+test('ambiguous forms, unknown words and phrases are kept unchanged', async () => {
+  const h = createHarness();
+  for (const [id, word] of [[1,'saw'], [2,'xylobloop'], [3,'running water']]) {
+    h.annotation(id, word); await h.run(`captureAnnotation(${id})`); await h.settle();
+  }
+  assert.equal(h.getData().saw.word, 'saw');
+  assert.equal(h.getData().xylobloop.word, 'xylobloop');
+  assert.equal(h.getData()['running water'].word, 'running water');
+});
+
 test('startup registers a working observer and visible menu labels', async () => {
   const h = createHarness();
   await h.run('startup()');
@@ -93,7 +119,7 @@ test('turning auto sync off cancels requests that have not begun', async () => {
   const h = createHarness(); h.annotation(1,'cancelled');
   await h.run('captureAnnotation(1); disableAutoSync()'); await h.settle();
   assert.equal(h.calls.length,0);
-  assert.equal(h.getData().cancelled.syncStatus,'pending');
+  assert.equal(h.getData().cancel.syncStatus,'pending');
   assert.ok(!h.notifications.some(n => /^已添加到 Anki/.test(n.headline)));
 });
 
@@ -111,12 +137,12 @@ test('manual batch sync reports partial failure and still processes later words'
 
 test('same-word note outside plugin ownership keeps its explanation and is adopted safely', async () => {
   const h = createHarness();
-  h.notes.set(1,{noteId:1,modelName:'Basic',tags:[],cards:[1001],fields:{'Front':{value:'owned',order:0},'Back':{value:'keep this',order:1}}});
+  h.notes.set(1,{noteId:1,modelName:'Basic',tags:[],cards:[1001],fields:{'Front':{value:'own',order:0},'Back':{value:'keep this',order:1}}});
   h.annotation(1,'owned'); await h.run('captureAnnotation(1)'); await h.settle();
   assert.equal(h.notes.size,1);
   assert.match(h.notes.get(1).fields['Back'].value,/^keep this/);
   assert.ok(h.notes.get(1).tags.includes('zotero_vocab_review'));
-  assert.equal(h.getData().owned.syncStatus,'synced');
+  assert.equal(h.getData().own.syncStatus,'synced');
 });
 
 test('dictionary enrichment is not lost when matching an untagged card during an in-flight sync', async () => {
@@ -131,7 +157,7 @@ test('dictionary enrichment is not lost when matching an untagged card during an
   }});
   h.run('saveAnkiConfig({endpoint:"http://127.0.0.1:8765",deckName:"Words",modelName:"词汇模板",frontField:"正面",backField:"解释"})');
   h.notes.set(7,{noteId:7,modelName:'词汇模板',tags:[],cards:[1007],fields:{
-    '正面':{value:'racing',order:0},'解释':{value:'Keep this',order:1},'例句':{value:'',order:2},'音标':{value:'',order:3},
+    '正面':{value:'race',order:0},'解释':{value:'Keep this',order:1},'例句':{value:'',order:2},'音标':{value:'',order:3},
   }});
   h.annotation(1,'racing');
   await h.run('captureAnnotation(1)');
@@ -141,7 +167,7 @@ test('dictionary enrichment is not lost when matching an untagged card during an
   await h.settle();
   assert.match(h.notes.get(7).fields['例句'].value,/This is a test/);
   assert.match(h.notes.get(7).fields['音标'].value,/ˈtɛst/);
-  assert.equal(h.getData().racing.syncStatus,'synced');
+  assert.equal(h.getData().race.syncStatus,'synced');
 });
 
 test('more encounters shorten review growth without trapping a remembered word at one day', () => {
@@ -191,7 +217,7 @@ test('first use automatically configures the available standard Basic template',
 test('first use detects localized field names without depending on English fields', async () => {
   const h=createHarness({models:{'问答题':['正面','背面']}}); h.annotation(1,'localized');
   await h.run('captureAnnotation(1)'); await h.settle();
-  assert.equal(h.getData().localized.syncStatus,'synced');
+  assert.equal(h.getData().localize.syncStatus,'synced');
   assert.equal(h.run('getAnkiConfig().backField'),'背面');
   assert.ok([...h.notes.values()][0].fields['正面']);
 });

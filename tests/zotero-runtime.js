@@ -26,6 +26,8 @@ async function verifyInZotero() {
     const health = JSON.parse(healthResponse.response);
     assert(health.running && health.listenerRegistered && health.version===PLUGIN_VERSION,'Actual local health endpoint did not confirm startup');
     report.checks.push('Actual local HTTP health endpoint confirmed plugin startup and listener registration');
+    assert(originalWord('leveraging') === 'leverage' && originalWord('saw') === 'saw', 'Offline lemma table not loaded or ambiguity not preserved');
+    report.checks.push('Bundled lemma table loaded and unambiguous inflection normalized');
     Zotero.Prefs.set(PREF_PREFIX+'deckName',deck,true);
     const config=await ensureAnkiConfig();
     report.checks.push('Actual first-use automatic model and field detection completed');

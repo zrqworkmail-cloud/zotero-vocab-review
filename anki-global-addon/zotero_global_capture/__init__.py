@@ -17,13 +17,17 @@ from ctypes import wintypes
 
 from aqt import gui_hooks, mw
 from aqt.qt import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
-    QHBoxLayout, QLabel, QLineEdit, QPushButton, QTimer, QVBoxLayout,
-    QWidget, QObject, pyqtSignal, Qt, QCursor, QSpinBox,
+    QApplication, QCheckBox, QComboBox, QDate, QDateEdit, QDialog, QDialogButtonBox, QEvent, QFormLayout, QGroupBox,
+    QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QTimer, QVBoxLayout,
+    QWidget, QObject, pyqtSignal, Qt, QCursor, QSpinBox, QTime, QTimeEdit,
 )
 
 from .background import configure_login_start
-from .review_popup import DesktopReviewController
+from .review_popup import DesktopReviewController, enable_click_away, popup_style
+from .review_logic import BOOK_TAGS, collection_plan, review_decks, selected_review_modes, validate_windows, window_minutes
+from .exam_dates import fetch_cet
+from .study_dashboard import activity_counts, dashboard_html
+from . import core_import, cet6_books, cet6_listening
 
 
 ADDON = __name__
@@ -39,7 +43,29 @@ DEFAULTS = {
     "confirm_seconds": 8,
     "review_enabled": True,
     "review_interval_minutes": 30,
+    "review_smart": True,
+    "review_core_enabled": True,
+    "review_book": "",
+    "review_extra_deck": "四六级单词",
+    "review_batch_size": 3,
+    "review_plan_mode": "fixed",
+    "review_daily_goal": 0,
+    "review_computer_hours": 8,
+    "review_deadline": "",
+    "review_exam": "manual",
+    "review_windows_enabled": False,
+    "review_windows": [
+        {"enabled": True, "start": "09:00", "end": "12:00"},
+        {"enabled": True, "start": "14:00", "end": "18:00"},
+        {"enabled": True, "start": "19:00", "end": "22:00"},
+    ],
+    "review_auto_word": True,
+    "review_hint_audio": False,
+    "review_auto_example": False,
+    "review_auto_example_mode": "first",
+    "review_known_style": "underline",
     "review_position": "corner",
+    "review_theme": "light",
     "review_mode": "mixed",
     "review_beautify": True,
     "review_start_at_login": False,
@@ -75,7 +101,10 @@ def log_runtime(event):
 
 def settings():
     value = dict(DEFAULTS)
-    value.update(mw.addonManager.getConfig(ADDON) or {})
+    stored = mw.addonManager.getConfig(ADDON) or {}
+    value.update(stored)
+    if 'review_auto_example_mode' not in stored and stored.get('review_auto_example'):
+        value['review_auto_example_mode'] = 'example'
     return value
 
 
@@ -113,16 +142,19 @@ def show_feedback(message, period=5000):
     notice.setTextFormat(Qt.TextFormat.PlainText)
     notice.setWordWrap(True)
     notice.setStyleSheet(
-        "QLabel { background: #202124; color: white; border: 1px solid #555; "
-        "border-radius: 8px; padding: 12px 16px; font-size: 14px; }"
+        "QLabel { background: #f4f6fb; color: #27344d; border: 1px solid #dce4f1; "
+        "border-left: 4px solid #5668ca; border-radius: 10px; padding: 12px 16px; "
+        "font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; font-size: 14px; }"
     )
     notice.setWindowFlags(
         Qt.WindowType.ToolTip | Qt.WindowType.WindowStaysOnTopHint |
         Qt.WindowType.WindowDoesNotAcceptFocus
     )
     notice.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-    notice.adjustSize()
     screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+    notice.setMinimumWidth(260)
+    notice.setMaximumWidth(min(420, max(260, screen.availableGeometry().width() - 48)) if screen else 420)
+    notice.adjustSize()
     if screen:
         area = screen.availableGeometry()
         notice.move(area.right() - notice.width() - 24, area.bottom() - notice.height() - 32)
@@ -151,6 +183,8 @@ def dictionary(word):
         root = json.loads(response.read().decode("utf-8"))
 
     def clean(value):
+        if isinstance(value, (list, tuple)):
+            return " ".join(part for part in (clean(item) for item in value) if part)
         return re.sub(r"\s+", " ", re.sub(r"<[^>]*>", " ", html.unescape(str(value or "")))).strip()
 
     definitions, examples, authority, phonetics, synonyms, roots = [], [], [], [], [], []
@@ -208,12 +242,16 @@ class Bridge(QObject):
 class NativeListener(threading.Thread):
     """Win32 global shortcut plus optional mouse-drag selection trigger."""
 
-    def __init__(self, bridge, config):
+    def __init__(self, bridge, config, report_status=True):
         super().__init__(daemon=True)
         self.bridge = bridge
         self.config = dict(config)
+        self.report_status = report_status
         self.thread_id = 0
         self.stop_event = threading.Event()
+        self.ready = threading.Event()
+        self.registered = False
+        self.registration_error = ''
         self.mouse_down = None
         self.hook = None
         self.hook_proc = None
@@ -250,12 +288,17 @@ class NativeListener(threading.Thread):
         dispatch_message = user32.DispatchMessageW
         dispatch_message.argtypes = [ctypes.POINTER(MSG)]
         if not register_hotkey(None, 1, int(cfg["modifiers"]), int(cfg["virtual_key"])):
+            code = ctypes.windll.kernel32.GetLastError()
+            self.registration_error = ('快捷键已被其他程序或系统占用' if code == 1409 else 'Windows 错误码 %s' % code)
             log_runtime("hotkey registration failed")
-            self.bridge.status.emit("全局快捷键注册失败；请在设置中更换按键。")
+            if self.report_status:
+                self.bridge.status.emit("全局快捷键注册失败：%s。" % self.registration_error)
         else:
+            self.registered = True
             log_runtime("hotkey registered: %s" % format_shortcut(cfg["modifiers"], cfg["virtual_key"]))
-            self.bridge.status.emit("全局划词入 Anki 已启动（%s）。" %
-                                     format_shortcut(cfg["modifiers"], cfg["virtual_key"]))
+            if self.report_status:
+                self.bridge.status.emit("全局划词入 Anki 已启动（%s）。" %
+                                         format_shortcut(cfg["modifiers"], cfg["virtual_key"]))
         if cfg["mode"] == "auto":
             callback_type = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
             self.hook_proc = callback_type(self._mouse_callback)
@@ -269,6 +312,9 @@ class NativeListener(threading.Thread):
             if not self.hook:
                 self.bridge.status.emit("自动模式的鼠标监听未能启动，请改用快捷键模式。")
         message = MSG()
+        # Create the thread message queue before reporting readiness so stop() can wake it.
+        user32.PeekMessageW(ctypes.byref(message), None, 0, 0, 0)
+        self.ready.set()
         log_runtime("listener message loop ready; thread=%s" % self.thread_id)
         while not self.stop_event.is_set():
             result = get_message(ctypes.byref(message), None, 0, 0)
@@ -328,7 +374,8 @@ class PreviewDialog(QDialog):
     def __init__(self, word, details, confirm):
         super().__init__(mw)
         self.setWindowTitle("划词释义预览")
-        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        self.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.WindowStaysOnTopHint)
+        enable_click_away(self)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("<b>%s</b>" % html.escape(word)))
@@ -348,6 +395,7 @@ class PreviewDialog(QDialog):
 
 class ShortcutEdit(QLineEdit):
     """Capture a supported Windows system-wide shortcut combination."""
+    feedback = pyqtSignal(str)
 
     def __init__(self, modifiers, virtual_key, parent=None):
         super().__init__(parent)
@@ -355,23 +403,48 @@ class ShortcutEdit(QLineEdit):
         self.setPlaceholderText("点击此处，然后按快捷键组合")
         self.modifiers = int(modifiers)
         self.virtual_key = int(virtual_key)
+        self.valid = True
         self._show_shortcut()
 
     def _show_shortcut(self):
         self.setText(format_shortcut(self.modifiers, self.virtual_key))
 
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        self.setText('正在录入：请按快捷键组合')
+        self.feedback.emit('正在录入快捷键；请同时按修饰键和目标键，按 Esc 取消。')
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        self._show_shortcut()
+        if not self.valid:
+            self.valid = True
+            self.feedback.emit('未录入有效组合，已保留原快捷键。')
+
     def keyPressEvent(self, event):
         key = int(event.key())
-        qt_modifiers = int(event.modifiers())
+        qt_modifiers = event.modifiers()
         modifiers = 0
-        if qt_modifiers & 0x04000000:
+        if qt_modifiers & Qt.KeyboardModifier.ControlModifier:
             modifiers |= MOD_CONTROL
-        if qt_modifiers & 0x08000000:
+        if qt_modifiers & Qt.KeyboardModifier.AltModifier:
             modifiers |= MOD_ALT
-        if qt_modifiers & 0x02000000:
+        if qt_modifiers & Qt.KeyboardModifier.ShiftModifier:
             modifiers |= MOD_SHIFT
-        if qt_modifiers & 0x10000000:
+        if qt_modifiers & Qt.KeyboardModifier.MetaModifier:
             modifiers |= MOD_WIN
+
+        if key == int(Qt.Key.Key_Escape):
+            self.valid = True
+            self._show_shortcut()
+            self.feedback.emit('已取消录入，保留当前组合。')
+            self.clearFocus()
+            event.accept()
+            return
+        if key in (int(Qt.Key.Key_Control), int(Qt.Key.Key_Shift), int(Qt.Key.Key_Alt), int(Qt.Key.Key_Meta)):
+            self.feedback.emit('正在录入：请继续按下字母、数字、功能键或导航键。')
+            event.accept()
+            return
 
         if 0x41 <= key <= 0x5A or 0x30 <= key <= 0x39:
             virtual_key = key
@@ -388,14 +461,19 @@ class ShortcutEdit(QLineEdit):
                 0x20: 0x20,       # Space
             }.get(key)
         if virtual_key is None:
-            self.setText("暂不支持此按键，请用字母、数字、F1–F24 或导航键")
+            self.valid = False
+            self.feedback.emit("录入失败：暂不支持此按键，请用字母、数字、F1–F24 或导航键。")
             return
         if not modifiers:
-            self.setText("请至少搭配 Ctrl、Alt、Shift 或 Win")
+            self.valid = False
+            self.feedback.emit("录入失败：请至少搭配 Ctrl、Alt、Shift 或 Win。")
             return
         self.modifiers = modifiers
         self.virtual_key = virtual_key
+        self.valid = True
         self._show_shortcut()
+        self.feedback.emit('已录入 %s；点击保存后注册。' % self.text())
+        event.accept()
 
 
 class Controller:
@@ -618,44 +696,330 @@ class Controller:
         self.listener.stop()
 
 
-def open_settings():
+def open_settings(parent=None):
+    if mw.col is None:
+        show_feedback('请先打开 Anki 账户，再配置复习设置。', period=5000)
+        return
     cfg = settings()
-    dialog = QDialog(mw)
+    original = dict(cfg)
+    dialog = QDialog(parent if isinstance(parent, QWidget) else mw)
     dialog.setWindowTitle("全局划词入 Anki")
-    form = QFormLayout(dialog)
+    style = '''
+        QDialog, QWidget#settingsBody { background: #f4f6fb; color: #25334d; }
+        QLabel, QCheckBox { color: #25334d; background: transparent; }
+        QComboBox, QSpinBox, QDateEdit, QTimeEdit, QLineEdit { background: #ffffff; color: #25334d; border: 1px solid #dce4f1;
+            border-radius: 7px; padding: 5px 9px; min-height: 24px; }
+        QComboBox:disabled, QSpinBox:disabled, QDateEdit:disabled, QTimeEdit:disabled, QLineEdit:disabled {
+            background: #edf1f7; color: #536179; }
+        QLineEdit:focus, QSpinBox:focus, QTimeEdit:focus, QDateEdit:focus, QComboBox:focus { border: 2px solid #536bd6; }
+        QComboBox QAbstractItemView { background: #ffffff; color: #25334d; selection-background-color: #e8edff; selection-color: #172554; }
+        QPushButton { background: #ffffff; color: #25334d; border: 1px solid #dce4f1; border-radius: 7px; padding: 6px 12px; }
+        QPushButton:disabled { color: #96a0b1; }
+        QPushButton#saveSettings { background: #5668ca; color: #ffffff; border: none; font-weight: 600; }
+        QPushButton#saveSettings:hover { background: #4557b5; }
+        QPushButton#saveSettings:disabled { background: #dce1ec; color: #7b8798; }
+        QScrollArea { border: none; background: #f4f6fb; }
+        QGroupBox { background: #ffffff; color: #25334d; font-weight: 600; border: 1px solid #dce4f1; border-radius: 9px; margin-top: 12px; padding: 14px 10px 8px; }
+        QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 5px; }
+    '''
+    try:
+        from aqt.theme import theme_manager
+        dark = bool(theme_manager.night_mode)
+    except (ImportError, AttributeError):
+        dark = False
+    if dark:
+        for old, new in {
+            '#f4f6fb': '#171c2b', '#25334d': '#e1e8f5', '#ffffff': '#252e40',
+            '#dce4f1': '#4a5971', '#edf1f7': '#343d4c', '#536179': '#aab4c5',
+            '#536bd6': '#aab8ff', '#e8edff': '#34415d', '#172554': '#f2f4ff',
+            '#96a0b1': '#aab4c5', '#5668ca': '#596dd1', '#4557b5': '#6e80df',
+            '#dce1ec': '#343d4c', '#7b8798': '#aab4c5',
+        }.items():
+            style = style.replace(old, new)
+        style += '''
+QPushButton#saveSettings { color: white; }
+QScrollBar:vertical { background: #171c2b; width: 12px; margin: 0; }
+QScrollBar::handle:vertical { background: #596a84; border-radius: 5px; min-height: 25px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+'''
+    dialog.setStyleSheet(style)
+    outer = QVBoxLayout(dialog)
+    scroll = QScrollArea(dialog)
+    scroll.setWidgetResizable(True)
+    form_widget = QWidget()
+    form_widget.setObjectName('settingsBody')
+    sections = QVBoxLayout(form_widget)
+    def section(title):
+        group = QGroupBox(title)
+        layout = QFormLayout(group)
+        sections.addWidget(group)
+        return layout
+    scroll.setWidget(form_widget)
+    outer.addWidget(scroll)
+    dialog.resize(620, 700)
     mode = QComboBox()
+    mode.setObjectName('captureMode')
     mode.addItem("选中后按快捷键添加", "direct")
     mode.addItem("选中后自动添加（鼠标拖选）", "auto")
     mode.addItem("快捷键预览释义，再按一次添加", "preview")
     mode.setCurrentIndex(max(0, mode.findData(cfg["mode"])))
-    deck = QLineEdit(str(cfg["deck"]))
-    model = QLineEdit(str(cfg["model"]))
-    front = QLineEdit(str(cfg["front_field"]))
-    back = QLineEdit(str(cfg["back_field"]))
+    deck = QComboBox()
+    deck.setObjectName('reviewDeck')
+    model = QComboBox()
+    model.setObjectName('reviewModel')
+    front = QComboBox()
+    front.setObjectName('reviewFrontField')
+    back = QComboBox()
+    back.setObjectName('reviewBackField')
+    deck_names = [item.name for item in mw.col.decks.all_names_and_ids(include_filtered=False)]
+    model_names = [item.name for item in mw.col.models.all_names_and_ids()]
+    def populate(combo, names, selected, optional=False):
+        combo.clear()
+        if optional:
+            combo.addItem('不使用补充牌组', '')
+        for name in names:
+            combo.addItem(name, name)
+        if selected and selected not in names:
+            combo.addItem('%s（未找到）' % selected, selected)
+        combo.setCurrentIndex(max(0, combo.findData(selected)))
+    populate(deck, deck_names, cfg['deck'])
+    main_review_deck = QComboBox()
+    main_review_deck.setObjectName('mainReviewDeck')
+    populate(main_review_deck, deck_names, cfg.get('review_main_deck') or cfg['deck'])
+    populate(model, model_names, cfg['model'])
+    def fields_for_model():
+        note_type = mw.col.models.by_name(model.currentData()) if model.currentData() in model_names else None
+        return mw.col.models.field_names(note_type) if note_type else []
+    def refresh_fields(initial=False):
+        names = fields_for_model()
+        old_front = cfg['front_field'] if initial else front.currentData()
+        old_back = cfg['back_field'] if initial else back.currentData()
+        if not initial and names:
+            if old_front not in names:
+                old_front = names[0]
+            if old_back not in names or old_back == old_front:
+                old_back = next((name for name in names if name != old_front), old_front)
+        populate(front, names, old_front)
+        populate(back, names, old_back)
+        update_validity()
     confirm_seconds = QComboBox()
+    confirm_seconds.setObjectName('previewSeconds')
     for seconds in (5, 8, 10, 15):
         confirm_seconds.addItem("%d 秒" % seconds, seconds)
     confirm_seconds.setCurrentIndex(max(0, confirm_seconds.findData(int(cfg["confirm_seconds"]))))
     shortcut = ShortcutEdit(cfg["modifiers"], cfg["virtual_key"])
+    shortcut_status = QLabel('点击输入框录入快捷键；保存时会检查是否注册成功。')
+    shortcut_status.setWordWrap(True)
+    shortcut.feedback.connect(shortcut_status.setText)
     review_enabled = QCheckBox("定时弹出单词复习")
     review_enabled.setChecked(bool(cfg["review_enabled"]))
     review_interval = QSpinBox()
     review_interval.setRange(5, 240)
     review_interval.setSuffix(" 分钟")
     review_interval.setValue(int(cfg["review_interval_minutes"]))
+    review_batch = QSpinBox()
+    review_batch.setObjectName('reviewBatch')
+    review_batch.setRange(1, 10)
+    review_batch.setSuffix(" 张")
+    review_batch.setValue(int(cfg["review_batch_size"]))
+    plan_mode = QComboBox()
+    plan_mode.setObjectName('planMode')
+    plan_mode.addItem('固定每组张数', 'fixed')
+    plan_mode.addItem('根据每日目标自动分组', 'daily')
+    plan_mode.setCurrentIndex(max(0, plan_mode.findData(cfg['review_plan_mode'])))
+    daily_goal = QSpinBox()
+    daily_goal.setObjectName('dailyGoal')
+    daily_goal.setRange(0, 9999)
+    daily_goal.setSpecialValueText('自动建议')
+    daily_goal.setValue(int(cfg['review_daily_goal']))
+    computer_hours = QSpinBox()
+    computer_hours.setObjectName('computerHours')
+    computer_hours.setRange(1, 24)
+    computer_hours.setSuffix(' 小时')
+    computer_hours.setValue(int(cfg['review_computer_hours']))
+    windows_enabled = QCheckBox('只在以下时段自动弹出')
+    windows_enabled.setObjectName('windowsEnabled')
+    windows_enabled.setChecked(bool(cfg['review_windows_enabled']))
+    windows_widget = QWidget()
+    windows_layout = QVBoxLayout(windows_widget)
+    windows_layout.setContentsMargins(0, 0, 0, 0)
+    window_rows = []
+    def add_window(value=None):
+        value = value or {'enabled': True, 'start': '09:00', 'end': '10:00'}
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        enabled = QCheckBox('启用')
+        enabled.setChecked(value.get('enabled', True))
+        start, end = QTimeEdit(), QTimeEdit()
+        for control, key in ((start, 'start'), (end, 'end')):
+            control.setDisplayFormat('HH:mm')
+            parsed = QTime.fromString(value.get(key, ''), 'HH:mm')
+            control.setTime(parsed if parsed.isValid() else QTime(9, 0))
+        remove = QPushButton('删除')
+        for widget in (enabled, start, QLabel('至'), end, remove):
+            layout.addWidget(widget)
+        windows_layout.addWidget(row)
+        window_rows.append((row, enabled, start, end, remove))
+        def remove_row():
+            if len(window_rows) > 3:
+                window_rows.remove(next(entry for entry in window_rows if entry[0] is row))
+                row.deleteLater()
+                windows_changed()
+        remove.clicked.connect(remove_row)
+        for control, signal in ((enabled, 'toggled'), (start, 'timeChanged'), (end, 'timeChanged')):
+            getattr(control, signal).connect(lambda *_: windows_changed())
+    for value in cfg['review_windows']:
+        add_window(value)
+    while len(window_rows) < 3:
+        add_window({'enabled': False, 'start': '09:00', 'end': '10:00'})
+    add_period = QPushButton('添加时段')
+    add_period.clicked.connect(lambda: (add_window({'enabled': False, 'start': '09:00', 'end': '10:00'}), windows_changed()))
+    windows_layout.addWidget(add_period)
+    def windows_value():
+        return [{'enabled': enabled.isChecked(), 'start': start.time().toString('HH:mm'), 'end': end.time().toString('HH:mm')}
+                for _, enabled, start, end, _ in window_rows]
+    deadline_enabled = QCheckBox('设置考试截止日期')
+    deadline_enabled.setChecked(bool(cfg['review_deadline']))
+    deadline = QDateEdit()
+    deadline.setCalendarPopup(True)
+    parsed_date = QDate.fromString(cfg['review_deadline'], 'yyyy-MM-dd')
+    deadline.setDate(parsed_date if parsed_date.isValid() else QDate.currentDate().addDays(30))
+    deadline.setEnabled(deadline_enabled.isChecked())
+    deadline_enabled.toggled.connect(deadline.setEnabled)
+    exam = QComboBox()
+    for label, value in [('手动设置 / 雅思 / 托福等', 'manual'), ('大学英语四级（笔试）', 'cet4'), ('大学英语六级（笔试）', 'cet6')]:
+        exam.addItem(label, value)
+    exam.setCurrentIndex(max(0, exam.findData(cfg['review_exam'])))
+    exam_status = QLabel('四六级日期可从中国教育考试网获取；其他考试请按准考证设置。')
+    exam_status.setWordWrap(True)
+    fetch_exam = QPushButton('从官方更新考试日期')
+    fetch_exam.setEnabled(exam.currentData() != 'manual')
+    class ExamBridge(QObject):
+        finished = pyqtSignal(str, str, str)
+    exam_bridge = ExamBridge(dialog)
+    exam_request_date = [None]
+    def receive_exam(kind, value, error):
+        fetch_exam.setEnabled(exam.currentData() != 'manual')
+        if exam.currentData() != kind:
+            return
+        if error:
+            exam_status.setText('自动获取失败：%s。请重试或手动设置日期。' % error)
+        elif exam_request_date[0] != deadline.date():
+            exam_status.setText('已保留手动修改的日期；官方日期为 %s。' % value)
+        else:
+            deadline_enabled.setChecked(True)
+            deadline.setDate(QDate.fromString(value, 'yyyy-MM-dd'))
+            exam_status.setText('日期来自中国教育考试网四六级报名首页；请以准考证为准。')
+    exam_bridge.finished.connect(receive_exam)
+    def request_exam():
+        kind = exam.currentData()
+        if kind == 'manual':
+            return
+        exam_request_date[0] = deadline.date()
+        fetch_exam.setEnabled(False)
+        exam_status.setText('正在读取中国教育考试网…')
+        def work():
+            try:
+                value, error = fetch_cet(), ''
+            except Exception as exc:
+                value, error = '', str(exc) or '网络不可用'
+            try:
+                exam_bridge.finished.emit(kind, value, error)
+            except RuntimeError:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+    def select_exam(_index):
+        fetch_exam.setEnabled(exam.currentData() != 'manual')
+        if exam.currentData() != 'manual':
+            request_exam()
+        else:
+            exam_status.setText('请根据报名信息或准考证手动设置考试日期。')
+    exam.currentIndexChanged.connect(select_exam)
+    fetch_exam.clicked.connect(request_exam)
+    plan_summary = QLabel()
+    plan_summary.setWordWrap(True)
+    review_auto_word = QCheckBox("揭晓后自动朗读单词")
+    review_auto_word.setChecked(bool(cfg["review_auto_word"]))
+    review_hint_audio = QCheckBox("字母提示时朗读该字母")
+    review_hint_audio.setChecked(bool(cfg["review_hint_audio"]))
+    review_auto_example = QComboBox()
+    for label, value in (("第一条例句", "first"), ("不自动朗读", "off"), ("普通例句", "example"), ("权威例句", "authority"), ("所有例句", "all")):
+        review_auto_example.addItem(label, value)
+    review_auto_example.setCurrentIndex(max(0, review_auto_example.findData(cfg["review_auto_example_mode"])))
+    review_core = QCheckBox("优先学习四六级核心词（到期复习仍优先）")
+    review_core.setChecked(bool(cfg.get("review_core_enabled", True)))
+    review_book = QComboBox()
+    review_book.setObjectName('reviewBook')
+    review_book.addItem('所选牌组', '')
+    review_book.addItem('六级核心词汇', 'cet6_core')
+    review_book.addItem('六级完整词书（ECDICT + 核心补充）', 'cet6_full')
+    review_book.addItem('四级词书（KyleBing）', 'cet4_kyle')
+    review_book.addItem('六级词书（KyleBing）', 'cet6_kyle')
+    review_book.setCurrentIndex(max(0, review_book.findData(cfg.get('review_book', ''))))
+    review_smart = QCheckBox("到期单词提前提醒（每 5 分钟检查）")
+    review_smart.setChecked(bool(cfg["review_smart"]))
+    selected_decks = review_decks(cfg)
+    deck_choices = QWidget()
+    deck_choices.setObjectName('reviewExtraDeck')
+    deck_choices_layout = QVBoxLayout(deck_choices)
+    deck_choices_layout.setContentsMargins(0, 0, 0, 0)
+    deck_choices_layout.setSpacing(3)
+    deck_checks = []
+    for name in list(deck_names) + [name for name in selected_decks if name not in deck_names]:
+        check = QCheckBox(name if name in deck_names else name + '（未找到）')
+        check.setProperty('deckName', name)
+        check.setChecked(name in selected_decks)
+        deck_choices_layout.addWidget(check)
+        deck_checks.append(check)
+    def extra_decks_value():
+        return [check.property('deckName') for check in deck_checks if check.isChecked()]
+    def mark_main_deck(*_args):
+        for check in deck_checks:
+            name = check.property('deckName')
+            main = name == main_review_deck.currentData()
+            check.setText(name + ('（主牌组）' if main else '' if name in deck_names else '（未找到）'))
+            if main:
+                check.setChecked(True)
+            check.setEnabled(not main)
+    main_review_deck.currentIndexChanged.connect(mark_main_deck)
+    mark_main_deck()
     review_position = QComboBox()
     review_position.addItem("屏幕右下角", "corner")
     review_position.addItem("屏幕中央", "center")
     review_position.setCurrentIndex(max(0, review_position.findData(cfg["review_position"])))
-    review_mode = QComboBox()
-    review_mode.addItem("选择题与英文填空混合", "mixed")
-    review_mode.addItem("选择题", "choice")
-    review_mode.addItem("英文填空", "typing")
-    review_mode.setCurrentIndex(max(0, review_mode.findData(cfg["review_mode"])))
+    review_theme = QComboBox()
+    review_theme.addItem("浅色", "light")
+    review_theme.addItem("深色", "dark")
+    review_theme.setCurrentIndex(max(0, review_theme.findData(cfg["review_theme"])))
+    review_modes_widget = QWidget()
+    review_modes_widget.setObjectName('reviewModes')
+    review_modes_layout = QVBoxLayout(review_modes_widget)
+    review_modes_layout.setContentsMargins(0, 0, 0, 0)
+    review_modes_layout.setSpacing(3)
+    chosen_modes = selected_review_modes(cfg)
+    mode_checks = []
+    for label, value in (("英文选中文", "choice"), ("中文选英文", "reverse"),
+                         ("释义拼写", "typing"), ("例句填空", "cloze"),
+                         ("听音拼写", "listening"), ("单词释义判断", "judgment"),
+                         ("口语回忆（自主评分）", "speaking")):
+        check = QCheckBox(label)
+        check.setProperty('reviewMode', value)
+        check.setChecked(value in chosen_modes)
+        review_modes_layout.addWidget(check)
+        mode_checks.append(check)
+    def review_modes_value():
+        return [check.property('reviewMode') for check in mode_checks if check.isChecked()]
+    known_style = QComboBox()
+    for label, value in (("下划线", "underline"), ("加粗", "bold"), ("不特别标记", "none")):
+        known_style.addItem(label, value)
+    known_style.setCurrentIndex(max(0, known_style.findData(cfg["review_known_style"])))
     review_beautify = QCheckBox("美化本牌组的 Anki 单词卡")
     review_beautify.setChecked(bool(cfg["review_beautify"]))
     review_start_at_login = QCheckBox("Windows 登录时启动 Anki 后台复习")
     review_start_at_login.setChecked(bool(cfg["review_start_at_login"]))
+    form = section('划词与 Anki 同步')
     form.addRow("收词方式", mode)
     form.addRow("Anki 牌组", deck)
     form.addRow("笔记类型", model)
@@ -663,41 +1027,263 @@ def open_settings():
     form.addRow("释义字段", back)
     form.addRow("预览确认有效期", confirm_seconds)
     form.addRow("全局快捷键", shortcut)
+    form.addRow(shortcut_status)
+    form.addRow(QLabel("点击快捷键输入框后按组合键；自动收词会暂存并恢复剪贴板。"))
+    form = section('复习提醒')
     form.addRow("随身复习", review_enabled)
     form.addRow("弹出间隔", review_interval)
-    form.addRow("弹出位置", review_position)
-    form.addRow("练习形式", review_mode)
-    form.addRow("卡片外观", review_beautify)
+    form.addRow("记忆复习", review_smart)
+    form.addRow("核心词优先", review_core)
+    form.addRow("复习词书", review_book)
+    form.addRow("主复习牌组", main_review_deck)
+    form.addRow("补充复习牌组（可多选）", deck_choices)
+    extra_help = QLabel("选择“所选牌组”时，计划统计主复习牌组及勾选的牌组，并仅统计上方所选笔记类型；选择词书时按标签跨牌组统计。复习遵守 Anki 每日新卡额度。")
+    extra_help.setWordWrap(True)
+    form.addRow(extra_help)
     form.addRow("后台运行", review_start_at_login)
-    form.addRow(QLabel("点击输入框后按组合键。至少需要一个修饰键；支持字母、数字、F1–F24 和常用导航键。"))
-    form.addRow(QLabel("自动模式在鼠标拖选后尝试复制选区；会暂存并恢复剪贴板。受保护窗口可能不支持。"))
+    form = section('学习计划与考试')
+    form.addRow("学习方式", plan_mode)
+    form.addRow("固定每组数量", review_batch)
+    batch_help = QLabel()
+    batch_help.setWordWrap(True)
+    form.addRow(batch_help)
+    form.addRow("每日目标（新词和复习合计）", daily_goal)
+    form.addRow("每天使用电脑（未启用时段时）", computer_hours)
+    form.addRow("学习时段", windows_enabled)
+    form.addRow("每日时段（同一天内）", windows_widget)
+    form.addRow("考试类型", exam)
+    form.addRow("官方日期", fetch_exam)
+    form.addRow(exam_status)
+    exam_link = QLabel('<a href="https://cet-kw.neea.edu.cn/Home/Index">四六级</a>　'
+                       '<a href="https://ielts.neea.cn/">雅思</a>　'
+                       '<a href="https://toefl.neea.cn/">托福</a>　官方报名')
+    exam_link.setOpenExternalLinks(True)
+    form.addRow(exam_link)
+    form.addRow("截止日期", deadline_enabled)
+    form.addRow("考试日期", deadline)
+    form.addRow("今日计划估算", plan_summary)
+    form = section('卡片显示与朗读')
+    form.addRow("弹出位置", review_position)
+    form.addRow("弹窗主题", review_theme)
+    form.addRow("练习形式（可多选）", review_modes_widget)
+    mode_help = QLabel("从所选题型中随机出题；例句不足时使用其他已选题型。")
+    mode_help.setWordWrap(True)
+    form.addRow(mode_help)
+    form.addRow("已收录单词标记", known_style)
+    form.addRow("自动发音", review_auto_word)
+    form.addRow("字母提示发音", review_hint_audio)
+    form.addRow("例句发音", review_auto_example)
+    form.addRow("卡片外观", review_beautify)
     buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+    buttons.button(QDialogButtonBox.StandardButton.Save).setObjectName('saveSettings')
+    buttons.button(QDialogButtonBox.StandardButton.Save).setText('保存')
+    buttons.button(QDialogButtonBox.StandardButton.Cancel).setText('取消')
+    validity = QLabel()
+    validity.setWordWrap(True)
+    outer.addWidget(validity)
+    def update_validity(*_args):
+        fields = fields_for_model()
+        problems = []
+        if deck.currentData() not in deck_names or model.currentData() not in model_names:
+            problems.append('请选择有效的牌组和笔记类型。')
+        if not review_book.currentData() and main_review_deck.currentData() not in deck_names:
+            problems.append('请选择有效的主复习牌组。')
+        if front.currentData() not in fields or back.currentData() not in fields or front.currentData() == back.currentData():
+            problems.append('单词字段和释义字段需要存在且不同。')
+        if not review_modes_value():
+            problems.append('请至少选择一种练习形式。')
+        if not shortcut.valid:
+            problems.append('请重新录入有效的快捷键。')
+        if not review_book.currentData() and any(name not in deck_names for name in extra_decks_value()):
+            problems.append('请取消选择未找到的补充牌组。')
+        if plan_mode.currentData() == 'daily' and daily_goal.value() == 0:
+            if not deadline_enabled.isChecked():
+                problems.append('自动分组需要设置每日目标或考试日期。')
+            elif deadline.date() < QDate.currentDate():
+                problems.append('考试日期已过，请更新日期或设置每日目标。')
+        if windows_enabled.isChecked() and not validate_windows(windows_value()):
+            problems.append('学习时段须开始早于结束，且不能重叠。')
+        buttons.button(QDialogButtonBox.StandardButton.Save).setEnabled(not problems)
+        validity.setText('\n'.join(problems))
+    model.currentIndexChanged.connect(lambda _index: refresh_fields())
+    shortcut.feedback.connect(update_validity)
+    for selector in (deck, main_review_deck, front, back):
+        selector.currentIndexChanged.connect(update_validity)
+    review_book.currentIndexChanged.connect(update_validity)
+    for check in deck_checks + mode_checks:
+        check.toggled.connect(update_validity)
+    refresh_fields(initial=True)
+    def update_plan(*_args):
+        if plan_mode.currentData() != 'daily':
+            plan_summary.setText('固定每组数量；复习时间由 Anki 决定。')
+            return
+        if deck.currentData() not in deck_names or model.currentData() not in model_names:
+            plan_summary.setText('请选择有效牌组和笔记类型。')
+            return
+        preview = dict(cfg, deck=deck.currentData(), model=model.currentData(),
+                       review_main_deck=main_review_deck.currentData(),
+                       review_extra_decks=extra_decks_value(),
+                       review_book=review_book.currentData(),
+                       review_deadline=deadline.date().toString('yyyy-MM-dd') if deadline_enabled.isChecked() else '',
+                       review_daily_goal=daily_goal.value(), review_computer_hours=computer_hours.value(),
+                       review_windows_enabled=windows_enabled.isChecked(), review_windows=windows_value(),
+                       review_interval_minutes=review_interval.value())
+        try:
+            plan = collection_plan(lambda _action, params: mw.col.find_cards(params['query']), preview)
+            days = ('距截止日期含今天 %d 天；' % plan['days']) if plan['days'] is not None else ''
+            plan_summary.setText(days + '今日新学：已学 %d / 目标 %d（剩余 %d）；复习：已复习 %d / 目标 %d（剩余 %d）；每组约 %d 张。'
+                                 % (plan['new_done'], plan['new_goal'], plan['new_remaining'], plan['review_done'],
+                                    plan['review_goal'], plan['review_remaining'], plan['batch']) +
+                                 (' 当前可用组数不足，尚差约 %d 张的容量；可缩短间隔或增加学习时段。' % plan['capacity_shortfall'] if plan['capacity_shortfall'] else '') +
+                                 ' 当前范围剩余新卡 %d 张；仅统计所选笔记类型。按 Anki 学习日统计，复习日期与每日上限由 Anki 控制。' % plan['remaining_new_total'])
+        except Exception:
+            plan_summary.setText('暂时无法读取牌组计划，请检查牌组。')
+    for control, signal in ((plan_mode, 'currentIndexChanged'), (deck, 'currentIndexChanged'), (main_review_deck, 'currentIndexChanged'),
+                            (review_book, 'currentIndexChanged'),
+                            (model, 'currentIndexChanged'),
+                            (daily_goal, 'valueChanged'), (computer_hours, 'valueChanged'),
+                            (review_interval, 'valueChanged'), (deadline, 'dateChanged'),
+                            (deadline_enabled, 'toggled')):
+        getattr(control, signal).connect(update_plan)
+    for check in deck_checks:
+        check.toggled.connect(update_plan)
+    for control, signal in ((plan_mode, 'currentIndexChanged'), (daily_goal, 'valueChanged'),
+                            (deadline_enabled, 'toggled'), (deadline, 'dateChanged')):
+        getattr(control, signal).connect(update_validity)
+    def windows_changed(*_args):
+        for _, _, _, _, remove in window_rows:
+            remove.setEnabled(len(window_rows) > 3)
+        windows_widget.setEnabled(windows_enabled.isChecked())
+        update_dependencies()
+        update_validity()
+        update_plan()
+    def update_dependencies(*_args):
+        auto_plan = plan_mode.currentData() == 'daily'
+        review_batch.setEnabled(not auto_plan)
+        daily_goal.setEnabled(auto_plan)
+        computer_hours.setEnabled(auto_plan and not windows_enabled.isChecked())
+        batch_help.setText('自动计划决定每组张数，固定数量暂不生效；完成目标后手动开始为 1 张。' if auto_plan
+                           else '按固定数量学习；切换为自动计划后，每组数量由每日目标计算。')
+        confirm_seconds.setEnabled(mode.currentData() == 'preview')
+        shortcut.setEnabled(mode.currentData() != 'auto')
+        shortcut_status.setText('自动收词无需快捷键；切回快捷键模式后原设置仍保留。' if mode.currentData() == 'auto'
+                                else '点击输入框录入快捷键；保存时会检查是否注册成功。')
+    mode.currentIndexChanged.connect(update_dependencies)
+    plan_mode.currentIndexChanged.connect(update_dependencies)
+    windows_enabled.toggled.connect(windows_changed)
+    windows_changed()
     buttons.accepted.connect(dialog.accept)
     buttons.rejected.connect(dialog.reject)
-    form.addRow(buttons)
-    if dialog.exec() != QDialog.DialogCode.Accepted:
-        return
+    outer.addWidget(buttons)
+    class WheelGuard(QObject):
+        def __init__(self):
+            super().__init__(dialog)
+            self.active = None
+
+        def eventFilter(self, watched, event):
+            if not isinstance(watched, QWidget) or watched.window() is not dialog:
+                return False
+            widget = watched
+            while widget is not None and widget is not dialog and not isinstance(widget, (QComboBox, QSpinBox, QDateEdit, QTimeEdit)):
+                widget = widget.parentWidget()
+            control = widget if isinstance(widget, (QComboBox, QSpinBox, QDateEdit, QTimeEdit)) else None
+            if event.type() == QEvent.Type.MouseButtonPress and control is not None:
+                self.active = control
+            elif event.type() == QEvent.Type.MouseButtonPress and self.active is not None and not watched.isAncestorOf(self.active):
+                self.active = None
+            elif event.type() == QEvent.Type.Wheel and control is not None:
+                focus = QApplication.focusWidget()
+                if control is self.active and (control.hasFocus() or (focus is not None and control.isAncestorOf(focus))):
+                    return False
+                bar = scroll.verticalScrollBar()
+                pixels = event.pixelDelta().y()
+                delta = pixels if pixels else event.angleDelta().y() * bar.singleStep() * 3 / 120
+                bar.setValue(bar.value() - int(delta))
+                return True
+            return False
+    guard = WheelGuard()
+    app = QApplication.instance()
+    app.installEventFilter(guard)
     try:
-        configure_login_start(review_start_at_login.isChecked())
-    except Exception as error:
-        show_feedback("开机启动设置失败：%s" % error, period=7000)
-        review_start_at_login.setChecked(False)
-    cfg.update({"mode": mode.currentData(), "deck": deck.text().strip(), "model": model.text().strip(),
-                "front_field": front.text().strip(), "back_field": back.text().strip(),
+        result = dialog.exec()
+    finally:
+        app.removeEventFilter(guard)
+    if result != QDialog.DialogCode.Accepted:
+        return
+    cfg.update({"mode": mode.currentData(), "deck": deck.currentData(), "model": model.currentData(),
+                "front_field": front.currentData(), "back_field": back.currentData(),
                 "modifiers": shortcut.modifiers, "virtual_key": shortcut.virtual_key,
                 "confirm_seconds": int(confirm_seconds.currentData()),
                 "review_enabled": review_enabled.isChecked(),
                 "review_interval_minutes": review_interval.value(),
+                "review_batch_size": review_batch.value(),
+                "review_plan_mode": plan_mode.currentData(),
+                "review_daily_goal": daily_goal.value(),
+                "review_computer_hours": computer_hours.value(),
+                "review_deadline": deadline.date().toString('yyyy-MM-dd') if deadline_enabled.isChecked() else '',
+                "review_exam": exam.currentData(),
+                "review_windows_enabled": windows_enabled.isChecked(),
+                "review_windows": windows_value(),
+                "review_auto_word": review_auto_word.isChecked(),
+                "review_hint_audio": review_hint_audio.isChecked(),
+                "review_auto_example_mode": review_auto_example.currentData(),
+                "review_smart": review_smart.isChecked(),
+                "review_core_enabled": review_core.isChecked(),
+                "review_main_deck": main_review_deck.currentData(),
+                "review_book": review_book.currentData(),
+                "review_extra_decks": extra_decks_value(),
                 "review_position": review_position.currentData(),
-                "review_mode": review_mode.currentData(),
+                "review_theme": review_theme.currentData(),
+                "review_modes": review_modes_value(),
+                "review_known_style": known_style.currentData(),
                 "review_beautify": review_beautify.isChecked(),
                 "review_start_at_login": review_start_at_login.isChecked()})
-    save_settings(cfg)
-    controller.stop()
-    controller.listener = NativeListener(controller.bridge, cfg)
-    controller.listener.start()
-    controller.review.start()
-    show_feedback("全局划词设置已保存。", period=5000)
+    listener_changed = any(cfg[key] != original[key] for key in ('mode', 'modifiers', 'virtual_key'))
+    if listener_changed:
+        controller.cancel_pending()
+        controller.listener.stop()
+        controller.listener.join(timeout=2)
+        if controller.listener.is_alive():
+            show_feedback('快捷键设置失败：原监听器未退出，请稍后重试。', period=9000)
+            return
+        candidate = NativeListener(controller.bridge, cfg, report_status=False)
+        candidate.start()
+        if not candidate.ready.wait(2) or not candidate.registered:
+            candidate.stop()
+            candidate.join(timeout=2)
+            controller.listener = NativeListener(controller.bridge, original, report_status=False)
+            controller.listener.start()
+            restored = controller.listener.ready.wait(2) and controller.listener.registered
+            reason = candidate.registration_error or '监听器未能及时启动'
+            show_feedback('快捷键设置失败：%s；%s。' % (reason, '已恢复原快捷键' if restored else '原快捷键未能恢复，请重启 Anki'), period=10000)
+            return
+        controller.listener = candidate
+    startup_error = ''
+    if cfg['review_start_at_login'] != original['review_start_at_login']:
+        try:
+            configure_login_start(cfg['review_start_at_login'])
+        except Exception as error:
+            startup_error = str(error)
+            cfg['review_start_at_login'] = original['review_start_at_login']
+    try:
+        save_settings(cfg)
+    except Exception as error:
+        if listener_changed:
+            controller.listener.stop()
+            controller.listener.join(timeout=2)
+            controller.listener = NativeListener(controller.bridge, original, report_status=False)
+            controller.listener.start()
+            controller.listener.ready.wait(2)
+        show_feedback('设置保存失败：%s；请检查后重试。' % error, period=10000)
+        return
+    if not controller.review.dialog:
+        controller.review.start()
+    if startup_error:
+        show_feedback('其他设置已保存；开机启动设置失败：%s。' % startup_error, period=10000)
+    elif not controller.listener.registered:
+        show_feedback('设置已保存，但快捷键未注册：%s。' % (controller.listener.registration_error or '监听器未启动'), period=10000)
+    else:
+        show_feedback("设置已保存；全局快捷键 %s 已注册。" % format_shortcut(cfg['modifiers'], cfg['virtual_key']), period=5000)
 
 
 def menu_action():
@@ -705,10 +1291,184 @@ def menu_action():
     action.triggered.connect(open_settings)
     review_action = mw.form.menuTools.addAction("单词随身复习：立即弹出一张")
     review_action.triggered.connect(lambda: controller.review.show_next(True))
+    core_action = mw.form.menuTools.addAction("四六级核心词：补充缺失词汇")
+    core_action.triggered.connect(import_core_words)
+    browse_action = mw.form.menuTools.addAction("四六级核心词：查看词表")
+    browse_action.triggered.connect(browse_core_words)
+    setup_books = mw.form.menuTools.addAction("六级词书：建立核心与完整词书")
+    setup_books.triggered.connect(setup_cet6_books)
+    core_book = mw.form.menuTools.addAction("六级词书：浏览核心词汇")
+    core_book.triggered.connect(lambda: browse_cet6_book('cet6_core'))
+    full_book = mw.form.menuTools.addAction("六级词书：浏览完整词汇")
+    full_book.triggered.connect(lambda: browse_cet6_book('cet6_full'))
+    cet4_kyle = mw.form.menuTools.addAction("四级词书（KyleBing）：查看词汇")
+    cet4_kyle.triggered.connect(lambda: browse_cet6_book('cet4_kyle'))
+    cet6_kyle = mw.form.menuTools.addAction("六级词书（KyleBing）：查看词汇")
+    cet6_kyle.triggered.connect(lambda: browse_cet6_book('cet6_kyle'))
+    listening = mw.form.menuTools.addAction("六级听力：本地真题与模拟")
+    listening.triggered.connect(open_cet6_listening)
     return action, review_action
 
 
+def import_core_words():
+    cfg = dict(settings())
+    show_feedback('正在核对核心词表；只补充缺失的词，请稍候。')
+    def work():
+        try:
+            result = core_import.import_missing(api, cfg, dictionary)
+            message = '核心词表：已有 %d 个，新增 %d 个' % (result['existing'], result['added'])
+            if result['failed']:
+                message += '；%d 个未取得释义或未能添加，可稍后重试。' % len(result['failed'])
+        except Exception as error:
+            message = '核心词表整理失败：%s' % error
+        mw.taskman.run_on_main(lambda: show_feedback(message, period=10000))
+    threading.Thread(target=work, daemon=True).start()
+
+
+def setup_cet6_books():
+    cfg = dict(settings())
+    show_feedback('正在整理六级词书，保留已有卡片的学习进度…')
+    def work():
+        try:
+            result = cet6_books.setup_books(api, cfg, dictionary)
+            message = '六级词书已整理：完整词书已有 %d 个，核心已有 %d 个，新增 %d 个。' % (result['existing_full'], result['existing_core'], result['added'])
+            if result['failed']:
+                message += ' %d 个未添加，可重新整理。' % len(result['failed'])
+        except Exception as error:
+            message = '六级词书整理未完成：%s' % error
+        mw.taskman.run_on_main(lambda: show_feedback(message, period=15000))
+    threading.Thread(target=work, daemon=True).start()
+
+
+def browse_cet6_book(book):
+    def work():
+        try:
+            api('guiBrowse', {'query': 'tag:' + BOOK_TAGS[book]})
+        except Exception as error:
+            message = '无法打开词书：%s' % error
+            mw.taskman.run_on_main(lambda: show_feedback(message, period=10000))
+    threading.Thread(target=work, daemon=True).start()
+
+
+def open_cet6_listening():
+    existing = getattr(controller, 'cet6_listening_dialog', None)
+    if existing and existing.isVisible():
+        existing.raise_()
+        existing.activateWindow()
+        return
+    dialog = cet6_listening.ListeningPractice(popup_style(settings()))
+    controller.cet6_listening_dialog = dialog
+    dialog.finished.connect(lambda _result: setattr(controller, 'cet6_listening_dialog', None))
+    dialog.show()
+
+
+def browse_core_words():
+    cfg = dict(settings())
+    def work():
+        try:
+            api('guiBrowse', {'query': core_import.browse_query(cfg)})
+        except Exception as error:
+            message = '无法打开核心词表：%s' % error
+            mw.taskman.run_on_main(lambda: show_feedback(message, period=10000))
+    threading.Thread(target=work, daemon=True).start()
+
+
+def add_review_to_toolbar(links, toolbar):
+    links.append(toolbar.create_link(
+        'zvr-desktop-review', '单词复习', open_review_from_toolbar,
+        tip='立即开始单词随身复习', id='zvr-desktop-review'))
+    links.append(toolbar.create_link(
+        'zvr-cet4-book', '四级词书', lambda: open_kyle_book('cet4_kyle'),
+        tip='切换到四级词书并开始弹窗学习', id='zvr-cet4-book'))
+    links.append(toolbar.create_link(
+        'zvr-cet6-book', '六级词书', lambda: open_kyle_book('cet6_kyle'),
+        tip='切换到六级词书并开始弹窗学习', id='zvr-cet6-book'))
+
+
+def open_kyle_book(book):
+    if mw.col is None or book not in ('cet4_kyle', 'cet6_kyle'):
+        show_feedback('请先打开 Anki 账户。')
+        return
+    if controller.review.dialog or controller.review.busy:
+        show_feedback('请先关闭当前复习卡，再切换词书。')
+        return
+    cfg = dict(settings())
+    model = cfg['model'].replace('\\', '\\\\').replace('"', '\\"')
+    if not mw.col.find_cards('note:"%s" tag:%s -is:suspended -is:buried' % (model, BOOK_TAGS[book])):
+        show_feedback('该词书没有可用卡片，请检查词书是否已导入。')
+        return
+    try:
+        cfg['review_book'] = book
+        save_settings(cfg)
+    except Exception as error:
+        show_feedback('切换词书失败：%s' % error)
+        return
+    controller.review.show_next(True)
+
+
+def add_study_dashboard(_browser, content):
+    cfg = settings()
+    if mw.col is None or (not cfg.get('review_deadline') and cfg.get('review_plan_mode') != 'daily'):
+        return
+    try:
+        import datetime
+        from aqt.theme import theme_manager
+        today = datetime.date.today()
+        plan = collection_plan(lambda _action, params: mw.col.find_cards(params['query']), cfg)
+        selected = set()
+        book_tag = BOOK_TAGS.get(cfg.get('review_book'))
+        for deck_name in ([None] if book_tag else review_decks(cfg)):
+            escaped_deck = (deck_name or '').replace('\\', '\\\\').replace('"', '\\"')
+            escaped_model = cfg['model'].replace('\\', '\\\\').replace('"', '\\"')
+            query = 'note:"%s" tag:%s' % (escaped_model, book_tag) if book_tag else 'deck:"%s" note:"%s"' % (escaped_deck, escaped_model)
+            selected.update(mw.col.find_cards(query))
+        start = datetime.datetime.combine(today - datetime.timedelta(days=27), datetime.time.min).timestamp()
+        rows = mw.col.db.all('select cid, id from revlog where id >= ?', int(start * 1000))
+        activity = activity_counts(rows, selected, today)
+        content.stats += dashboard_html(today, cfg.get('review_deadline', ''), plan, activity,
+                                        bool(theme_manager.night_mode), cfg.get('review_plan_mode') == 'daily')
+    except Exception as error:
+        log_runtime('study dashboard unavailable: %s' % type(error).__name__)
+
+
+def open_review_from_toolbar():
+    log_runtime('desktop review toolbar clicked')
+    controller.review.show_next(True)
+
+
+def ensure_anki_connect():
+    addon_path = mw.addonManager.addonsFolder('2055492159')
+    if os.path.isdir(addon_path):
+        if not mw.addonManager.isEnabled('2055492159'):
+            show_feedback('AnkiConnect 已安装但处于停用状态，启用并重启 Anki 后可同步。', period=10000)
+        return
+    def check():
+        try:
+            if api('version', {}, timeout=2):
+                return
+        except Exception:
+            pass
+        mw.taskman.run_on_main(install)
+    def install():
+        if os.path.isdir(addon_path):
+            return
+        try:
+            from aqt.addons import download_addons, download_encountered_problem
+            def done(log):
+                if download_encountered_problem(log) or not os.path.isdir(addon_path):
+                    show_feedback('AnkiConnect 自动安装失败，请检查网络后重启 Anki。', period=10000)
+                else:
+                    show_feedback('AnkiConnect 已安装，请重启 Anki 以启用同步。', period=12000)
+            download_addons(mw, mw.addonManager, [2055492159], done)
+        except Exception as error:
+            log_runtime('AnkiConnect setup failed: %s' % type(error).__name__)
+            show_feedback('AnkiConnect 自动安装未能启动，请检查网络和附加组件设置。', period=10000)
+    threading.Thread(target=check, daemon=True).start()
+
+
 def on_main_window_ready():
+    mw.toolbar.redraw()
+    ensure_anki_connect()
     if settings().get("review_start_at_login", False):
         try:
             configure_login_start(True)
@@ -722,9 +1482,14 @@ def on_main_window_ready():
 
 try:
     controller = Controller()
+    controller.review.open_settings = open_settings
+    controller.review.dictionary = dictionary
+    controller.review.add_word = controller.add_note
     log_runtime("desktop review controller initialized")
     menu_action_ref = menu_action()
+    gui_hooks.top_toolbar_did_init_links.append(add_review_to_toolbar)
     gui_hooks.card_will_show.append(controller.review.style_card)
+    gui_hooks.deck_browser_will_render_content.append(add_study_dashboard)
     gui_hooks.profile_did_open.append(controller.review.start)
     gui_hooks.profile_will_close.append(controller.stop)
     gui_hooks.main_window_did_init.append(on_main_window_ready)

@@ -119,6 +119,8 @@ function createHarness(options = {}) {
     },
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'bootstrap.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'lemma-data.js'), 'utf8'), context);
+  vm.runInContext('lemmaMap = VOCAB_LEMMAS', context);
   return {
     context, prefs, items, notes, models, notifications, calls, alerts, menus, win,
     run: expr => vm.runInContext(expr, context),

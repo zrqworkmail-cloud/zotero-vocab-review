@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
-FILES = ('manifest.json', 'bootstrap.js', 'prefs.xhtml', 'prefs.js', 'icons/icon-48.png', 'icons/icon-96.png', 'LICENSE', 'THIRD-PARTY-NOTICES.md')
+FILES = ('manifest.json', 'bootstrap.js', 'lemma-data.js', 'prefs.xhtml', 'prefs.js', 'icons/icon-48.png', 'icons/icon-96.png', 'LICENSE', 'THIRD-PARTY-NOTICES.md')
 
 
 def build_release(root, repository, output):

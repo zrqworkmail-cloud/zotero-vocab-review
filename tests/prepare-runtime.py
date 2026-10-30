@@ -8,6 +8,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--windows-root', help='Windows path to runtime-verification when running from WSL')
+parser.add_argument('--startup-only', action='store_true', help='Only test startup and lemma data, without modifying Anki')
 args = parser.parse_args()
 root = Path(__file__).resolve().parent.parent
 base = root / 'runtime-verification'
@@ -34,7 +35,8 @@ prefs = {
 manifest = json.loads((root / 'manifest.json').read_text())
 with ZipFile(profile / 'extensions' / (manifest['applications']['zotero']['id'] + '.xpi'), 'w', ZIP_DEFLATED) as archive:
     archive.write(root / 'manifest.json', 'manifest.json')
-    archive.writestr('bootstrap.js', (root / 'bootstrap.js').read_text() + '\n' + (root / 'tests/zotero-runtime.js').read_text())
-    for name in ['icons/icon-48.png', 'icons/icon-96.png', 'LICENSE']:
+    test_script = 'tests/zotero-lemma-runtime.js' if args.startup_only else 'tests/zotero-runtime.js'
+    archive.writestr('bootstrap.js', (root / 'bootstrap.js').read_text() + '\n' + (root / test_script).read_text())
+    for name in ['lemma-data.js', 'prefs.xhtml', 'prefs.js', 'icons/icon-48.png', 'icons/icon-96.png', 'LICENSE']:
         archive.write(root / name, name)
 print(base)

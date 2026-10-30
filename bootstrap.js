@@ -1,4 +1,4 @@
-const PLUGIN_VERSION = "0.4.0-beta.8";
+const PLUGIN_VERSION = "0.4.0-beta.10";
 const PLUGIN_ID = "zotero-vocab-review@local";
 const STATUS_PATH = "/vocab-review/status";
 const MENU_ID = "zotero-vocab-review-tools";
@@ -29,6 +29,7 @@ let ankiPathPrompted = false;
 let generation = 0;
 let running = false;
 let lastCaptureAt = null;
+let lemmaMap = Object.create(null);
 const queuedSyncs = new Map();
 const notificationTimers = new Set();
 const dictionaryLookups = new Map();
@@ -310,6 +311,11 @@ function normalizeWord(text) {
     .toLowerCase();
 }
 
+function originalWord(text) {
+  const word = normalizeWord(text);
+  return /^[a-z]+$/.test(word) ? (Object.hasOwn(lemmaMap, word) ? lemmaMap[word] : word) : word;
+}
+
 function escapeHTML(text) {
   return String(text || "").replace(/[&<>"']/g, (char) => ({
     "&": "&amp;",
@@ -406,7 +412,7 @@ async function captureAnnotation(itemID) {
   if (!item || !item.isAnnotation?.() || !["highlight", "underline"].includes(item.annotationType)) return;
 
   const original = String(item.annotationText || "").trim();
-  const word = normalizeWord(original);
+  const word = originalWord(original);
   const annotationID = `${item.libraryID}:${item.key}`;
   if (!word) return;
   if (original.length > 60 || countWords(original) > 5) {
@@ -436,32 +442,35 @@ async function captureAnnotation(itemID) {
 
   const now = Date.now();
   const source = getSource(item);
+  const displayWord = normalizeWord(original) === word ? original : word;
   const entry = data[word];
   if (entry) {
-    entry.word = entry.word || original;
+    entry.word = entry.word || displayWord;
     entry.count = (entry.count || 1) + 1;
     if (comment && !cleanMeaning(entry.meaning)) {
       entry.meaning = comment;
       entry.meaningSource = "annotation";
     }
     entry.annotationIDs = [...(entry.annotationIDs || []), annotationID];
+    entry.surfaceForms = [...new Set([...(entry.surfaceForms || []), original])].slice(-30);
     entry.sources = [...new Set([...(entry.sources || []), source])].slice(-30);
     entry.lastCaptured = now;
     entry.dueAt = Math.min(entry.dueAt || now, now);
   } else {
     data[word] = {
-      word: original, meaning: comment, meaningSource: comment ? "annotation" : "", count: 1, reviews: 0,
+      word: displayWord, meaning: comment, meaningSource: comment ? "annotation" : "", count: 1, reviews: 0,
       intervalDays: 0, dueAt: now, lastCaptured: now,
-      annotationIDs: [annotationID], sources: [source],
+      annotationIDs: [annotationID], sources: [source], surfaceForms: [original],
     };
   }
   markPending(data[word]);
   saveData(data);
   void enrichFromLiterature(word, item);
   enrichFromDictionary(word);
-  const details = entry
+  const formDetails = normalizeWord(original) !== word ? `文献词形：${original}；原形：${word}。` : "";
+  const details = formDetails + (entry
     ? `之前收录过，本次为第 ${data[word].count} 次；复习优先级已提高。`
-    : "首次收录。";
+    : "首次收录。");
   syncCapturedWord(word, details);
 }
 
@@ -1120,11 +1129,19 @@ function registerMenus() {
   });
 }
 
-async function startup() {
+async function startup({ rootURI } = {}) {
   const currentGeneration = ++generation;
   await Zotero.initializationPromise;
   await Zotero.uiReadyPromise;
   if (currentGeneration !== generation) return;
+  if (rootURI) {
+    const scope = {};
+    Services.scriptloader.loadSubScript(rootURI + "lemma-data.js", scope, "UTF-8");
+    if (!scope.VOCAB_LEMMAS || typeof scope.VOCAB_LEMMAS !== "object") {
+      throw new Error("无法读取词形还原数据，插件未启动。");
+    }
+    lemmaMap = scope.VOCAB_LEMMAS;
+  }
   running = true;
   notifierID = Zotero.Notifier.registerObserver(
     {
