@@ -324,11 +324,59 @@ BOOK_TAGS = {'cet6_core': 'zvr_cet6_core', 'cet6_full': 'zvr_cet6_full',
              'cet4_kyle': 'zvr_kyle_cet4', 'cet6_kyle': 'zvr_kyle_cet6'}
 
 
+def _clean_list(value):
+    return [str(item).strip() for item in value if str(item or '').strip()] if isinstance(value, list) else []
+
+
+def scope_tags(cfg):
+    """Tags that narrow the study scope. The old single-select book still resolves."""
+    tags = _clean_list(cfg.get('review_scope_tags'))
+    if tags:
+        return tags
+    legacy = BOOK_TAGS.get(cfg.get('review_book'))
+    return [legacy] if legacy else []
+
+
+def scope_decks(cfg):
+    """Decks the scope covers. An empty list means every deck that carries the tags."""
+    return _clean_list(cfg.get('review_scope_decks'))
+
+
+def scope_is_all_decks(cfg):
+    return not scope_decks(cfg)
+
+
+def tags_clause(cfg):
+    tags = scope_tags(cfg)
+    if not tags:
+        return ''
+    escape = lambda value: str(value).replace('\\', '\\\\').replace('"', '\\"')
+    # Anki treats several bare tag: terms as OR; AND has to be written out.
+    joiner = ' AND ' if cfg.get('review_tags_all') else ' '
+    return ' ' + joiner.join('tag:"%s"' % escape(tag) for tag in tags)
+
+
+def scope_label(cfg, deck_names=None):
+    """A human-readable name for what is being studied, shown on the card."""
+    name = str(cfg.get('review_scope_name') or '').strip()
+    if name:
+        return name
+    decks = scope_decks(cfg)
+    if deck_names is not None:
+        decks = [deck for deck in decks if deck in deck_names]
+    tags = [tag[4:] if tag.startswith('zvr_') else tag for tag in scope_tags(cfg)]
+    parts = []
+    if decks:
+        parts.append('、'.join(decks[:2]) + ('' if len(decks) <= 2 else ' 等 %d 个牌组' % len(decks)))
+    if tags:
+        parts.append('、'.join(tags[:2]) + ('' if len(tags) <= 2 else ' 等 %d 个标签' % len(tags)))
+    return ' · '.join(parts) or '所选牌组'
+
+
 def _search(cfg, all_decks=False):
     escape = lambda value: str(value).replace('\\', '\\\\').replace('"', '\\"')
     deck = '' if all_decks else 'deck:"%s" ' % escape(cfg['deck'])
-    tag = BOOK_TAGS.get(cfg.get('review_book'))
-    return '%snote:"%s"%s -is:suspended -is:buried' % (deck, escape(cfg['model']), ' tag:' + tag if tag else '')
+    return '%snote:"%s"%s -is:suspended -is:buried' % (deck, escape(cfg['model']), tags_clause(cfg))
 
 
 def _stats(api, deck):
@@ -525,6 +573,9 @@ def end_of_session_reason(plan, limits_new):
 
 
 def review_decks(cfg):
+    scope = scope_decks(cfg)
+    if scope:
+        return scope
     selected = cfg.get('review_extra_decks')
     if not isinstance(selected, list):
         selected = [cfg.get('review_extra_deck', '')]
@@ -536,11 +587,16 @@ def review_decks(cfg):
     return result
 
 
+def scope_uses_all_decks(cfg):
+    """Tags alone define the scope, so every deck carrying them is searched."""
+    return scope_is_all_decks(cfg) and bool(scope_tags(cfg))
+
+
 def collection_plan(api, cfg, now=None):
     now = now or datetime.datetime.now()
     decks = review_decks(cfg)
     found = {'new': set(), 'due': set(), 'done': set(), 'introduced': set()}
-    for deck in ([None] if cfg.get('review_book') in BOOK_TAGS else decks):
+    for deck in ([None] if scope_uses_all_decks(cfg) else decks):
         base = _search(dict(cfg, deck=deck), all_decks=deck is None)
         for key, suffix in (('new', 'is:new'), ('due', 'is:due -is:new'), ('done', 'rated:1'), ('introduced', 'introduced:1')):
             found[key].update(api('findCards', {'query': base + ' ' + suffix}) or [])
@@ -630,7 +686,7 @@ def distractor_candidates(target, cards, cfg, mode, rng):
 def prepare_question(api, cfg, mode='mixed', rng=random, due_only=False):
     profile = api('getActiveProfile', {})
     available = set(api('deckNames', {}) or [])
-    if cfg.get('review_book') in BOOK_TAGS:
+    if scope_uses_all_decks(cfg):
         decks = [deck for deck in sorted(available)
                  if api('findCards', {'query': _search(dict(cfg, deck=deck))})]
     else:
@@ -782,7 +838,7 @@ def submit_review(api, cfg, question, ease, answer=None):
     if api('getActiveProfile', {}) != question['profile']:
         raise ValueError('Anki 账户已切换，这张卡片不会被评分。')
     deck = question.get('review_deck', cfg['deck'])
-    if cfg.get('review_book') not in BOOK_TAGS and deck not in review_decks(cfg):
+    if not scope_uses_all_decks(cfg) and deck not in review_decks(cfg):
         raise ValueError('复习牌组已改变，请在下次提醒时复习。')
     cfg = dict(cfg, deck=deck)
     current = api('cardsInfo', {'cards': [question['card_id']]}) or []

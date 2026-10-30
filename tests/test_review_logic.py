@@ -76,7 +76,7 @@ class ReviewLogicTests(unittest.TestCase):
 
     def test_cet6_book_search_is_tag_scoped_across_decks(self):
         cfg = dict(CFG, review_book='cet6_core')
-        self.assertIn('tag:zvr_cet6_core', logic._search(cfg))
+        self.assertIn('tag:"zvr_cet6_core"', logic._search(cfg))
         self.assertNotIn('deck:', logic._search(cfg, all_decks=True))
         queries = []
         def api(_action, params):
@@ -84,7 +84,51 @@ class ReviewLogicTests(unittest.TestCase):
             return []
         logic.collection_plan(api, cfg)
         self.assertEqual(len(queries), 4)
-        self.assertTrue(all('tag:zvr_cet6_core' in q and 'deck:' not in q for q in queries))
+        self.assertTrue(all('tag:"zvr_cet6_core"' in q and 'deck:' not in q for q in queries))
+
+    def test_scope_combines_selected_decks_with_tags(self):
+        cfg = dict(CFG, review_scope_decks=['四级词书', '六级词书'], review_scope_tags=['cet4_core'])
+        self.assertEqual(logic.review_decks(cfg), ['四级词书', '六级词书'])
+        self.assertFalse(logic.scope_uses_all_decks(cfg))
+        search = logic._search(dict(cfg, deck='四级词书'))
+        self.assertIn('deck:"四级词书"', search)
+        self.assertIn('tag:"cet4_core"', search)
+
+    def test_tags_without_decks_span_the_whole_collection(self):
+        cfg = dict(CFG, review_scope_decks=[], review_scope_tags=['cet4_core'])
+        self.assertTrue(logic.scope_uses_all_decks(cfg))
+        self.assertNotIn('deck:', logic._search(cfg, all_decks=True))
+
+    def test_no_tags_and_no_scope_decks_falls_back_to_the_configured_decks(self):
+        cfg = dict(CFG, review_scope_decks=[], review_scope_tags=[], review_book='')
+        self.assertFalse(logic.scope_uses_all_decks(cfg))
+        self.assertNotIn('tag:', logic._search(cfg))
+
+    def test_multiple_tags_default_to_any_and_can_require_all(self):
+        cfg = dict(CFG, review_scope_tags=['cet4', 'core'])
+        self.assertEqual(logic.tags_clause(cfg), ' tag:"cet4" tag:"core"')
+        cfg = dict(cfg, review_tags_all=True)
+        self.assertEqual(logic.tags_clause(cfg), ' tag:"cet4" AND tag:"core"')
+
+    def test_explicit_scope_beats_the_legacy_book(self):
+        cfg = dict(CFG, review_book='cet6_core', review_scope_tags=['my_tag'])
+        self.assertEqual(logic.scope_tags(cfg), ['my_tag'])
+        self.assertIn('tag:"my_tag"', logic._search(cfg))
+        self.assertNotIn('zvr_cet6_core', logic._search(cfg))
+
+    def test_tag_with_quotes_and_spaces_survives_the_search(self):
+        clause = logic.tags_clause(dict(CFG, review_scope_tags=['has space', 'say"this']))
+        self.assertEqual(clause, ' tag:"has space" tag:"say\\"this"')
+
+    def test_scope_label_names_the_deck_and_tag_selection(self):
+        self.assertEqual(logic.scope_label(dict(CFG, review_scope_name='四级核心')), '四级核心')
+        label = logic.scope_label(dict(CFG, review_scope_decks=['四级词书'],
+                                       review_scope_tags=['zvr_cet4_core']))
+        self.assertEqual(label, '四级词书 · cet4_core')
+        self.assertEqual(logic.scope_label(dict(CFG)), '所选牌组')
+        # A deck the collection no longer has must not end up on the card.
+        self.assertEqual(logic.scope_label(dict(CFG, review_scope_decks=['gone', 'live']),
+                                           deck_names={'live'}).replace(' · ', ''), 'live')
 
     def test_book_card_can_be_graded_from_unselected_deck(self):
         api = FakeAnki()

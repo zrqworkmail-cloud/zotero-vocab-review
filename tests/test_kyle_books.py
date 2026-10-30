@@ -44,7 +44,7 @@ class ImportTests(unittest.TestCase):
             self.assertIn('句子。',notes[1]['fields']['例句']['value'])
             second=books.import_books(api,cfg,p,p/'journal.jsonl')
             self.assertEqual((second['reused'],second['added']), (3,0))
-            self.assertIn('tag:zvr_kyle_cet4', logic._search(dict(cfg, deck='X', review_book='cet4_kyle')))
-            self.assertIn('tag:zvr_kyle_cet6', logic._search(dict(cfg, deck='X', review_book='cet6_kyle')))
+            self.assertIn('tag:"zvr_kyle_cet4"', logic._search(dict(cfg, deck='X', review_book='cet4_kyle')))
+            self.assertIn('tag:"zvr_kyle_cet6"', logic._search(dict(cfg, deck='X', review_book='cet6_kyle')))
 
 if __name__ == '__main__': unittest.main()
