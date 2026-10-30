@@ -1444,15 +1444,18 @@ def browse_core_words():
 
 
 def add_review_to_toolbar(links, toolbar):
+    # Links are rebuilt as HTML strings each time Anki runs this hook, so the current
+    # scope can be named here; a saved change shows up on the next toolbar rebuild.
+    scope = scope_label(settings()) or '所选牌组'
     links.append(toolbar.create_link(
-        'zvr-desktop-review', '单词复习', open_review_from_toolbar,
-        tip='立即开始单词随身复习', id='zvr-desktop-review'))
+        'zvr-desktop-review', '开始学习', open_review_from_toolbar,
+        tip='按当前学习范围（%s）立即弹出学习卡' % scope, id='zvr-desktop-review'))
     links.append(toolbar.create_link(
-        'zvr-cet4-book', '四级词书', lambda: open_kyle_book('cet4_kyle'),
-        tip='切换到四级词书并开始弹窗学习', id='zvr-cet4-book'))
+        'zvr-cet4-book', '四级范围', lambda: open_kyle_book('cet4_kyle'),
+        tip='把学习范围切到四级标签（跨全部牌组）并开始学习', id='zvr-cet4-book'))
     links.append(toolbar.create_link(
-        'zvr-cet6-book', '六级词书', lambda: open_kyle_book('cet6_kyle'),
-        tip='切换到六级词书并开始弹窗学习', id='zvr-cet6-book'))
+        'zvr-cet6-book', '六级范围', lambda: open_kyle_book('cet6_kyle'),
+        tip='把学习范围切到六级标签（跨全部牌组）并开始学习', id='zvr-cet6-book'))
 
 
 def open_kyle_book(book):
@@ -1460,21 +1463,21 @@ def open_kyle_book(book):
         show_feedback('请先打开 Anki 账户。')
         return
     if controller.review.dialog or controller.review.busy:
-        show_feedback('请先关闭当前复习卡，再切换词书。')
+        show_feedback('请先关闭当前复习卡，再切换学习范围。')
         return
     cfg = dict(settings())
     model = cfg['model'].replace('\\', '\\\\').replace('"', '\\"')
     if not mw.col.find_cards('note:"%s" tag:%s -is:suspended -is:buried' % (model, BOOK_TAGS[book])):
-        show_feedback('该词书没有可用卡片，请检查词书是否已导入。')
+        show_feedback('这个范围下没有可用卡片，请检查对应标签是否已导入。')
         return
     try:
         cfg['review_book'] = ''
         cfg['review_scope_tags'] = [BOOK_TAGS[book]]
         cfg['review_scope_decks'] = []
-        cfg['review_scope_name'] = '四级词书' if book == 'cet4_kyle' else '六级词书'
+        cfg['review_scope_name'] = '四级词汇' if book == 'cet4_kyle' else '六级词汇'
         save_settings(cfg)
     except Exception as error:
-        show_feedback('切换词书失败：%s' % error)
+        show_feedback('切换学习范围失败：%s' % error)
         return
     controller.review.show_next(True)
 
