@@ -59,7 +59,8 @@ class FakeAnki:
 # generated queries identical to the pre-book ones.
 CFG = {'deck': 'Literature', 'model': 'Words', 'front_field': 'Front', 'back_field': 'Back',
        'study_book': 'literature',
-       'study_books': [{'id': 'literature', 'name': '文献单词', 'deck': 'Literature'}]}
+       'study_books': [{'id': 'literature', 'name': '文献单词', 'deck': 'Literature'},
+                       {'id': 'cet', 'name': 'CET 标签范围', 'tag': 'zvr_cet6_core'}]}
 
 
 class ReviewLogicTests(unittest.TestCase):
@@ -79,75 +80,19 @@ class ReviewLogicTests(unittest.TestCase):
         logic._captured_words(api, cfg)
         self.assertEqual(len(calls), 4)
 
-    def test_cet6_book_search_is_tag_scoped_across_decks(self):
-        cfg = dict(CFG, review_book='cet6_core')
-        self.assertIn('tag:"zvr_cet6_core"', logic._search(cfg))
-        self.assertNotIn('deck:', logic._search(cfg, all_decks=True))
-        queries = []
-        def api(_action, params):
-            queries.append(params['query'])
-            return []
-        logic.collection_plan(api, cfg)
-        self.assertEqual(len(queries), 4)
-        self.assertTrue(all('tag:"zvr_cet6_core"' in q and 'deck:' not in q for q in queries))
-
-    def test_scope_combines_selected_decks_with_tags(self):
-        cfg = dict(CFG, review_scope_decks=['四级词书', '六级词书'], review_scope_tags=['cet4_core'])
-        self.assertEqual(logic.review_decks(cfg), ['四级词书', '六级词书'])
-        self.assertFalse(logic.scope_uses_all_decks(cfg))
-        search = logic._search(dict(cfg, deck='四级词书'))
-        self.assertIn('deck:"四级词书"', search)
-        self.assertIn('tag:"cet4_core"', search)
-
-    def test_tags_without_decks_span_the_whole_collection(self):
-        cfg = dict(CFG, review_scope_decks=[], review_scope_tags=['cet4_core'])
-        self.assertTrue(logic.scope_uses_all_decks(cfg))
-        self.assertNotIn('deck:', logic._search(cfg, all_decks=True))
-
-    def test_no_tags_and_no_scope_decks_falls_back_to_the_configured_decks(self):
-        cfg = dict(CFG, review_scope_decks=[], review_scope_tags=[], review_book='')
-        self.assertFalse(logic.scope_uses_all_decks(cfg))
-        self.assertNotIn('tag:', logic._search(cfg))
-
-    def test_multiple_tags_default_to_any_and_can_require_all(self):
-        cfg = dict(CFG, review_scope_tags=['cet4', 'core'])
-        self.assertEqual(logic.tags_clause(cfg), ' tag:"cet4" tag:"core"')
-        cfg = dict(cfg, review_tags_all=True)
-        self.assertEqual(logic.tags_clause(cfg), ' tag:"cet4" AND tag:"core"')
-
-    def test_explicit_scope_beats_the_legacy_book(self):
-        cfg = dict(CFG, review_book='cet6_core', review_scope_tags=['my_tag'])
-        self.assertEqual(logic.scope_tags(cfg), ['my_tag'])
-        self.assertIn('tag:"my_tag"', logic._search(cfg))
-        self.assertNotIn('zvr_cet6_core', logic._search(cfg))
-
-    def test_tag_with_quotes_and_spaces_survives_the_search(self):
-        clause = logic.tags_clause(dict(CFG, review_scope_tags=['has space', 'say"this']))
-        self.assertEqual(clause, ' tag:"has space" tag:"say\\"this"')
-
-    def test_scope_label_names_the_deck_and_tag_selection(self):
-        self.assertEqual(logic.scope_label(dict(CFG, review_scope_name='四级核心')), '四级核心')
-        label = logic.scope_label(dict(CFG, review_scope_decks=['四级词书'],
-                                       review_scope_tags=['zvr_cet4_core']))
-        self.assertEqual(label, '四级词书 · cet4_core')
-        self.assertEqual(logic.scope_label(dict(CFG)), '')
-        # A deck the collection no longer has must not end up on the card.
-        self.assertEqual(logic.scope_label(dict(CFG, review_scope_decks=['gone', 'live']),
-                                           deck_names={'live'}).replace(' · ', ''), 'live')
-
-    def test_book_card_can_be_graded_from_unselected_deck(self):
+    def test_book_card_can_be_graded_from_any_deck_it_spans(self):
         api = FakeAnki()
         api.cards[1]['deckName'] = 'CET'
         def scoped_api(action, params):
             if action == 'getDeckStats':
                 return {'1': dict(api.stats, name=params['decks'][0])}
             return api(action, params)
-        cfg = dict(CFG, review_book='cet6_core', review_extra_decks=[])
+        # A tag book is not the capture deck; the card it pulls from CET is still its own.
+        cfg = dict(CFG, study_book='cet')
         question = logic.prepare_question(scoped_api, cfg, 'typing', random.Random(1))
         self.assertEqual(question['review_deck'], 'CET')
         logic.submit_review(scoped_api, cfg, question, 3)
         self.assertEqual(api.answered[-1]['cardId'], 1)
-
     def test_book_skips_decks_without_matching_cards(self):
         api = FakeAnki()
         def scoped_api(action, params):
@@ -301,31 +246,29 @@ class ReviewLogicTests(unittest.TestCase):
         self.assertEqual((overloaded['batch'], overloaded['capacity_shortfall']), (10, 80))
 
     def test_beautify_applies_to_selected_decks_and_children(self):
-        cfg = dict(CFG, review_extra_decks=['CET', 'Other'])
-        self.assertTrue(logic.should_style_card('Other::Level', 'Words', 'reviewAnswer', cfg))
+        cfg = dict(CFG, study_book='cet', _book_decks=['Literature', 'CET'], _book_decks_key='cet')
+        self.assertTrue(logic.should_style_card('CET::Level', 'Words', 'reviewAnswer', cfg))
+        self.assertTrue(logic.should_style_card('Literature', 'Words', 'reviewAnswer', cfg))
         self.assertFalse(logic.should_style_card('Unselected', 'Words', 'reviewAnswer', cfg))
-        self.assertFalse(logic.should_style_card('Other', 'Another model', 'reviewAnswer', cfg))
-
-    def test_multiple_decks_migrate_old_setting_and_deduplicate(self):
-        self.assertEqual(logic.review_decks(dict(CFG, review_extra_deck='CET')), ['Literature', 'CET'])
-        self.assertEqual(logic.review_decks(dict(CFG, review_extra_decks=['CET', 'Other', 'CET', 'Literature'])),
-                         ['Literature', 'CET', 'Other'])
-        self.assertEqual(logic.review_decks(dict(CFG, review_extra_decks=[], review_extra_deck='CET')), ['Literature'])
-        self.assertEqual(logic.review_decks(dict(CFG, review_main_deck='Other', review_extra_decks=['CET'],
-                                                  review_core_enabled=True)), ['Other', 'CET'])
-
-    def test_plan_uses_user_selected_main_deck_and_reports_remaining_new(self):
+        self.assertFalse(logic.should_style_card('CET', 'Another model', 'reviewAnswer', cfg))
+    def test_plan_queries_the_book_decks_and_reports_remaining_new(self):
         queries = []
         def api(action, params):
+            if action == 'deckNames':
+                return ['CET']
             queries.append(params['query'])
-            return list(range(100)) if 'is:new' in params['query'] and '-is:new' not in params['query'] else []
-        plan = logic.collection_plan(api, dict(CFG, review_main_deck='CET', review_extra_decks=[],
+            if 'is:new' in params['query'] and '-is:new' not in params['query']:
+                return list(range(100))
+            # No stage marker means resolve_book_decks is probing whether this deck
+            # holds the book at all; an empty answer would drop the deck entirely.
+            return [1] if not any(marker in params['query'] for marker in ('is:due', 'rated:', 'introduced:')) else []
+        plan = logic.collection_plan(api, dict(CFG, study_book='cet',
                                                review_deadline='2026-11-02'), datetime.datetime(2026, 10, 30))
         self.assertEqual(plan['remaining_new_total'], 100)
         self.assertEqual(plan['new'], 25)
-        self.assertTrue(all('deck:"CET"' in query for query in queries))
+        self.assertTrue(all('deck:"CET"' in query for query in queries), queries)
 
-    def test_selected_second_additional_deck_is_eligible_and_can_be_graded(self):
+    def test_a_card_outside_the_book_cannot_be_graded_from_it(self):
         api = FakeAnki()
         api.cards[1]['deckName'] = 'Other'
         original = api.__call__
@@ -336,14 +279,15 @@ class ReviewLogicTests(unittest.TestCase):
                 deck = params['decks'][0]
                 return {'1': dict(api.stats, name=deck, review_count=1 if deck == 'Other' else 0)}
             return original(action, params)
-        cfg = dict(CFG, review_extra_decks=['CET', 'Other'])
+        cfg = dict(CFG, study_book='cet', _book_decks=['Literature', 'CET', 'Other'], _book_decks_key='cet')
         question = logic.prepare_question(lookup, cfg, 'typing', random.Random(2))
         self.assertEqual(question['review_deck'], 'Other')
         logic.submit_review(lookup, cfg, question, 3)
         self.assertEqual(api.answered[0]['cardId'], 1)
+        # Narrowing the book so it no longer spans the deck the question came from must
+        # refuse, rather than grade a card the user is no longer studying.
         with self.assertRaises(ValueError):
-            logic.submit_review(lookup, dict(cfg, review_extra_decks=['CET']), question, 3)
-
+            logic.submit_review(lookup, dict(cfg, _book_decks=['Literature']), question, 3)
     def test_root_sections_keep_labels_inline_and_align_related_words(self):
         result = logic.root_detail_html('词根：\npriest\nadj.\npriestly 祭司的\npriestlike 僧侣般的\nn.\npriesthood 神职')
         self.assertIn('<td width="48" valign="top">词根：</td><td>priest</td>', result)
@@ -582,12 +526,11 @@ class ReviewLogicTests(unittest.TestCase):
                 deck = params['decks'][0]
                 return {'1': dict(api.stats, name=deck, review_count=1 if deck == 'CET' else 0)}
             return original(action, params)
-        cfg = dict(CFG, review_extra_deck='CET')
+        cfg = dict(CFG, study_book='cet')
         question = logic.prepare_question(lookup, cfg, 'typing', random.Random(2))
         self.assertEqual(question['card_id'], 1)
         self.assertEqual(question['review_deck'], 'CET')
         self.assertEqual(question['kind'], 'due')
-
     def test_reverse_choices_and_cloze_use_correct_content(self):
         api = FakeAnki()
         api.cards[1]['fields']['例句'] = {'value': 'This notion is useful.'}

@@ -337,13 +337,16 @@ STUDY_BOOKS = (
     {'id': 'cet6_full', 'name': '六级全表', 'tag': 'zvr_cet6_full'},
     {'id': 'cet4_core', 'name': '四级核心', 'tag': 'zvr_cet4_core'},
     {'id': 'cet4_full', 'name': '四级全表', 'tag': 'zvr_kyle_cet4'},
+    {'id': 'cet6_kyle', 'name': '六级词表（KyleBing）', 'tag': 'zvr_kyle_cet6'},
     {'id': 'literature', 'name': '文献单词', 'deck': '文献单词'},
 )
 BOOK_BY_ID = {book['id']: book for book in STUDY_BOOKS}
-# Old configs pointed at the retired 词书 / deck+tag layer; land them on the nearest book.
+# Old configs point at retired 词书 ids and tag names. Every legacy value has to land
+# on the book that means the same cards — mapping 六级词表 onto 六级全表 would quietly
+# swap one word list for another, which is worse than showing a redundant entry.
 BOOK_MIGRATION = {'cet6_core': 'cet6_core', 'cet6_full': 'cet6_full', 'cet4_kyle': 'cet4_full',
-                  'cet6_kyle': 'cet6_full', 'zvr_cet6_core': 'cet6_core', 'zvr_cet6_full': 'cet6_full',
-                  'zvr_cet4_core': 'cet4_core', 'zvr_kyle_cet4': 'cet4_full', 'zvr_kyle_cet6': 'cet6_full',
+                  'cet6_kyle': 'cet6_kyle', 'zvr_cet6_core': 'cet6_core', 'zvr_cet6_full': 'cet6_full',
+                  'zvr_cet4_core': 'cet4_core', 'zvr_kyle_cet4': 'cet4_full', 'zvr_kyle_cet6': 'cet6_kyle',
                   '文献单词': 'literature'}
 
 
@@ -361,17 +364,24 @@ def study_books(cfg=None):
 
 
 def study_book_id(cfg):
-    """The chosen book, or None when nothing valid has been picked yet."""
-    value = str(cfg.get('study_book') or '').strip()
+    """The chosen book, or None when nothing valid has been picked yet.
+
+    Every route into a book id is checked against the catalogue in force: a legacy
+    value that names a book this config does not offer must resolve to nothing rather
+    than to a dangling id, which would silently study nothing.
+    """
     known = {book['id'] for book in study_books(cfg)}
+    value = str(cfg.get('study_book') or '').strip()
     if value in known:
         return value
-    for legacy in (cfg.get('review_scope_tags'), cfg.get('review_extra_decks')):
-        for item in (legacy if isinstance(legacy, list) else []):
-            mapped = BOOK_MIGRATION.get(str(item).strip())
-            if mapped in known:
-                return mapped
-    return BOOK_MIGRATION.get(str(cfg.get('review_book') or '').strip()) or None
+    candidates = [str(item).strip() for item in (cfg.get('review_scope_tags') or [])
+                  if isinstance(cfg.get('review_scope_tags'), list)]
+    candidates += [str(cfg.get('review_book') or '').strip()]
+    for candidate in candidates:
+        mapped = BOOK_MIGRATION.get(candidate)
+        if mapped in known:
+            return mapped
+    return None
 
 
 def study_book(cfg):
