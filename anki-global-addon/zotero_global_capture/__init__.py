@@ -18,13 +18,15 @@ from ctypes import wintypes
 from aqt import gui_hooks, mw
 from aqt.qt import (
     QApplication, QCheckBox, QComboBox, QDate, QDateEdit, QDialog, QDialogButtonBox, QEvent, QFormLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QTimer, QVBoxLayout,
+    QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton, QRadioButton, QScrollArea, QTimer, QVBoxLayout,
     QWidget, QObject, pyqtSignal, Qt, QCursor, QSpinBox, QTime, QTimeEdit,
 )
 
 from .background import configure_login_start
 from .review_popup import DesktopReviewController, enable_click_away, popup_style
-from .review_logic import BOOK_TAGS, collection_plan, review_decks, scope_decks, scope_label, scope_tags, scope_uses_all_decks, selected_review_modes, validate_windows, window_minutes
+from .review_logic import (BOOK_MIGRATION, book_clause, book_label, book_progress, collection_plan,
+                           resolve_book_decks, study_book, study_book_id, study_books, selected_review_modes,
+                           validate_windows, window_minutes)
 from .exam_dates import fetch_cet
 from .study_dashboard import activity_counts, dashboard_html
 from . import core_import, cet6_books, cet6_listening
@@ -46,10 +48,7 @@ DEFAULTS = {
     "review_smart": True,
     "review_core_enabled": True,
     "review_book": "",
-    "review_scope_decks": [],
-    "review_scope_tags": [],
-    "review_tags_all": False,
-    "review_scope_name": "",
+    "study_book": "",
     "review_extra_deck": "四六级单词",
     "review_batch_size": 3,
     "review_plan_mode": "fixed",
@@ -114,6 +113,14 @@ def settings():
 
 def save_settings(value):
     mw.addonManager.writeConfig(ADDON, value)
+
+
+def collection_api(action, params):
+    """Adapt Anki's in-process collection to the action/params shape review_logic
+    speaks, so the settings preview and the dashboard can share one code path."""
+    if action == 'deckNames':
+        return [entry.name for entry in mw.col.decks.all_names_and_ids(include_filtered=False)]
+    return mw.col.find_cards(params['query'])
 
 
 def local_tags():
@@ -806,9 +813,6 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
             combo.addItem('%s（未找到）' % selected, selected)
         combo.setCurrentIndex(max(0, combo.findData(selected)))
     populate(deck, deck_names, cfg['deck'])
-    main_review_deck = QComboBox()
-    main_review_deck.setObjectName('mainReviewDeck')
-    populate(main_review_deck, deck_names, cfg.get('review_main_deck') or cfg['deck'], keep_missing=False)
     populate(model, model_names, cfg['model'])
     def fields_for_model():
         note_type = mw.col.models.by_name(model.currentData()) if model.currentData() in model_names else None
@@ -972,87 +976,34 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     review_auto_example.setCurrentIndex(max(0, review_auto_example.findData(cfg["review_auto_example_mode"])))
     review_core = QCheckBox("优先学习四六级核心词（到期复习仍优先）")
     review_core.setChecked(bool(cfg.get("review_core_enabled", True)))
-    # The scope is built from this collection itself: whatever decks exist and
-    # whatever tags exist, rather than a book list fixed in the source.
-    scope_name = QLineEdit()
-    scope_name.setObjectName('reviewScopeName')
-    scope_name.setText(str(cfg.get('review_scope_name') or ''))
-    scope_name.setPlaceholderText('留空则按牌组和标签自动命名')
-    chosen_tags = set(scope_tags(cfg))
-    available_tags = local_tags()
-    tag_choices = QWidget()
-    tag_choices.setObjectName('reviewScopeTags')
-    tag_choices_layout = QVBoxLayout(tag_choices)
-    tag_choices_layout.setContentsMargins(0, 0, 0, 0)
-    tag_choices_layout.setSpacing(3)
-    tag_checks = []
-    for tag in sorted(set(available_tags or ()) | chosen_tags):
-        check = QCheckBox(tag)
-        check.setProperty('tagName', tag)
-        check.setChecked(tag in chosen_tags)
-        tag_choices_layout.addWidget(check)
-        tag_checks.append(check)
-    if not tag_checks:
-        tag_choices_layout.addWidget(QLabel('读不到标签列表：请重开 Anki 再试。' if available_tags is None
-                                            else '这个账户还没有任何标签。'))
-    tag_scroll = QScrollArea()
-    tag_scroll.setObjectName('reviewScopeTagsScroll')
-    tag_scroll.setWidgetResizable(True)
-    tag_scroll.setWidget(tag_choices)
-    tag_scroll.setFixedHeight(150)
-    tags_match = QComboBox()
-    tags_match.setObjectName('reviewTagsMatch')
-    tags_match.addItem('任一标签（或）', False)
-    tags_match.addItem('全部标签（且）', True)
-    tags_match.setCurrentIndex(max(0, tags_match.findData(bool(cfg.get('review_tags_all')))))
-    def tags_value():
-        return [check.property('tagName') for check in tag_checks if check.isChecked()]
-    # Cross-deck tag search is a state the toolbar book buttons already write, so it
-    # needs a control. Only honour a saved config that chose it explicitly: a legacy
-    # book with no scope keys should migrate into the user's old deck list, not into
-    # "all decks", which would quietly widen their scope.
-    all_decks = QCheckBox("不限牌组（在全部牌组中按标签查找）")
-    all_decks.setObjectName('reviewAllDecks')
-    all_decks.setChecked(not scope_decks(cfg) and bool(cfg.get('review_scope_tags')))
+    # The book list is the whole scope model now: pick one named book here and every
+    # card says which book it came from. Books whose tag or deck is not actually in
+    # this collection are not offered, so the list can never drift away from reality.
+    known_tags = local_tags()
+    available_books = [book for book in study_books(cfg)
+                       if (book.get('tag') and known_tags and book['tag'] in known_tags)
+                       or (book.get('deck') and book['deck'] in deck_names)]
+    chosen_book = study_book_id(cfg)
+    book_choices = QWidget()
+    book_choices.setObjectName('studyBookList')
+    book_choices_layout = QVBoxLayout(book_choices)
+    book_choices_layout.setContentsMargins(0, 0, 0, 0)
+    book_choices_layout.setSpacing(3)
+    book_radios = []
+    for book in available_books:
+        radio = QRadioButton(book['name'])
+        radio.setObjectName('studyBook')
+        radio.setProperty('bookId', book['id'])
+        radio.setToolTip('范围：%s' % (book.get('tag') or ('牌组 ' + book.get('deck', ''))))
+        radio.setChecked(book['id'] == chosen_book)
+        book_choices_layout.addWidget(radio)
+        book_radios.append(radio)
+    if not book_radios:
+        book_choices_layout.addWidget(QLabel('这个账户里还没有可学的词书，请先导入词表或给卡片打标签。'))
+    def book_value():
+        return next((radio.property('bookId') for radio in book_radios if radio.isChecked()), '')
     review_smart = QCheckBox("到期单词提前提醒（每 5 分钟检查）")
     review_smart.setChecked(bool(cfg["review_smart"]))
-    selected_decks = review_decks(cfg)
-    # Only decks that actually exist. A saved reference to a deleted deck matches
-    # nothing, so listing it as 未找到 just cluttered the picker; it is dropped on
-    # save and named in the note below instead.
-    dropped_decks = sorted({name for name in ([cfg.get('review_main_deck')] + list(selected_decks))
-                            if name and name not in deck_names})
-    deck_choices = QWidget()
-    deck_choices.setObjectName('reviewExtraDeck')
-    deck_choices_layout = QVBoxLayout(deck_choices)
-    deck_choices_layout.setContentsMargins(0, 0, 0, 0)
-    deck_choices_layout.setSpacing(3)
-    deck_checks = []
-    for name in deck_names:
-        check = QCheckBox(name)
-        check.setProperty('deckName', name)
-        check.setChecked(name in selected_decks)
-        deck_choices_layout.addWidget(check)
-        deck_checks.append(check)
-    def extra_decks_value():
-        return [check.property('deckName') for check in deck_checks if check.isChecked()]
-    def scope_decks_value():
-        """The decks actually studied: the main deck first, then the ticked ones.
-        不限牌组 leaves the list empty so the tags alone define a cross-deck scope."""
-        if all_decks.isChecked():
-            return []
-        names = [main_review_deck.currentData()] + extra_decks_value()
-        return [name for index, name in enumerate(names) if name and names.index(name) == index]
-    def mark_main_deck(*_args):
-        for check in deck_checks:
-            name = check.property('deckName')
-            main = name == main_review_deck.currentData()
-            check.setText(name + ('（主牌组）' if main else ''))
-            if main:
-                check.setChecked(True)
-            check.setEnabled(not main and not all_decks.isChecked())
-    main_review_deck.currentIndexChanged.connect(mark_main_deck)
-    mark_main_deck()
     review_position = QComboBox()
     review_position.addItem("屏幕右下角", "corner")
     review_position.addItem("屏幕中央", "center")
@@ -1102,14 +1053,8 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     form.addRow("弹出间隔", review_interval)
     form.addRow("记忆复习", review_smart)
     form.addRow("核心词优先", review_core)
-    form.addRow("范围名称", scope_name)
-    form.addRow("主复习牌组", main_review_deck)
-    form.addRow("补充复习牌组（可多选）", deck_choices)
-    form.addRow("学习标签（可多选）", tag_scroll)
-    form.addRow("标签匹配", tags_match)
-    form.addRow("", all_decks)
-    extra_help = QLabel("牌组和标签共同决定学什么：勾选的牌组限定范围，选中的标签在其上再过滤；勾选“不限牌组”则跨全部牌组按标签查找。只统计上方所选笔记类型。每日新卡上限按牌组计，由 Anki 控制，不是由这里的计划决定。"
-                        + ('已保存的 %s 在本账户中不存在，已从列表移除，保存后不再引用。' % '、'.join(dropped_decks) if dropped_decks else ''))
+    form.addRow("学习词书（单选）", book_choices)
+    extra_help = QLabel("选一本词书就开始学，卡片上会一直写着它的名字和进度。词书是标签视图，不是牌组：六级核心本来就是六级全表的一部分，而一张卡只能属于一个牌组，所以用标签才能并列。每日新卡上限仍按牌组计，由 Anki 控制。")
     extra_help.setObjectName('scopeHelp')
     extra_help.setWordWrap(True)
     form.addRow(extra_help)
@@ -1159,16 +1104,14 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
         problems = []
         if deck.currentData() not in deck_names or model.currentData() not in model_names:
             problems.append('请选择有效的牌组和笔记类型。')
-        if not tags_value() and main_review_deck.currentData() not in deck_names:
-            problems.append('请选择有效的主复习牌组。')
+        if not book_value():
+            problems.append('请选择一本要学的词书。')
         if front.currentData() not in fields or back.currentData() not in fields or front.currentData() == back.currentData():
             problems.append('单词字段和释义字段需要存在且不同。')
         if not review_modes_value():
             problems.append('请至少选择一种练习形式。')
         if not shortcut.valid:
             problems.append('请重新录入有效的快捷键。')
-        if all_decks.isChecked() and not tags_value():
-            problems.append('不限牌组需要至少勾选一个标签，否则范围会是整个账户。')
         if plan_mode.currentData() == 'daily' and daily_goal.value() == 0:
             if not deadline_enabled.isChecked():
                 problems.append('自动分组需要设置每日目标或考试日期。')
@@ -1180,14 +1123,12 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
         validity.setText('\n'.join(problems))
     model.currentIndexChanged.connect(lambda _index: refresh_fields())
     shortcut.feedback.connect(update_validity)
-    for selector in (deck, main_review_deck, front, back):
+    for selector in (deck, front, back):
         selector.currentIndexChanged.connect(update_validity)
-    tags_match.currentIndexChanged.connect(update_validity)
-    scope_name.textChanged.connect(update_validity)
-    for check in deck_checks + mode_checks + tag_checks:
+    for radio in book_radios:
+        radio.toggled.connect(update_validity)
+    for check in mode_checks:
         check.toggled.connect(update_validity)
-    all_decks.toggled.connect(lambda _checked: mark_main_deck())
-    all_decks.toggled.connect(update_validity)
     refresh_fields(initial=True)
     def update_plan(*_args):
         if plan_mode.currentData() != 'daily':
@@ -1197,18 +1138,13 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
             plan_summary.setText('请选择有效牌组和笔记类型。')
             return
         preview = dict(cfg, deck=deck.currentData(), model=model.currentData(),
-                       review_main_deck=main_review_deck.currentData(),
-                       review_extra_decks=extra_decks_value(),
-                       review_scope_decks=scope_decks_value(),
-                       review_scope_tags=tags_value(),
-                       review_tags_all=bool(tags_match.currentData()),
-                       review_book='',
+                       study_book=book_value(),
                        review_deadline=deadline.date().toString('yyyy-MM-dd') if deadline_enabled.isChecked() else '',
                        review_daily_goal=daily_goal.value(), review_computer_hours=computer_hours.value(),
                        review_windows_enabled=windows_enabled.isChecked(), review_windows=windows_value(),
                        review_interval_minutes=review_interval.value())
         try:
-            plan = collection_plan(lambda _action, params: mw.col.find_cards(params['query']), preview)
+            plan = collection_plan(collection_api, preview)
             days = ('距截止日期含今天 %d 天；' % plan['days']) if plan['days'] is not None else ''
             plan_summary.setText(days + '今日新学：已学 %d / 目标 %d（剩余 %d）；复习：已复习 %d / 目标 %d（剩余 %d）；每组约 %d 张。'
                                  % (plan['new_done'], plan['new_goal'], plan['new_remaining'], plan['review_done'],
@@ -1217,14 +1153,13 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
                                  ' 当前范围剩余新卡 %d 张；仅统计所选笔记类型。按 Anki 学习日统计，复习日期与每日上限由 Anki 控制。' % plan['remaining_new_total'])
         except Exception:
             plan_summary.setText('暂时无法读取牌组计划，请检查牌组。')
-    for control, signal in ((plan_mode, 'currentIndexChanged'), (deck, 'currentIndexChanged'), (main_review_deck, 'currentIndexChanged'),
-                            (tags_match, 'currentIndexChanged'), (scope_name, 'textChanged'), (all_decks, 'toggled'),
+    for control, signal in ((plan_mode, 'currentIndexChanged'), (deck, 'currentIndexChanged'),
                             (model, 'currentIndexChanged'),
                             (daily_goal, 'valueChanged'), (computer_hours, 'valueChanged'),
                             (review_interval, 'valueChanged'), (deadline, 'dateChanged'),
                             (deadline_enabled, 'toggled')):
         getattr(control, signal).connect(update_plan)
-    for check in deck_checks + tag_checks:
+    for check in book_radios:
         check.toggled.connect(update_plan)
     for control, signal in ((plan_mode, 'currentIndexChanged'), (daily_goal, 'valueChanged'),
                             (deadline_enabled, 'toggled'), (deadline, 'dateChanged')):
@@ -1308,13 +1243,7 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
                 "review_auto_example_mode": review_auto_example.currentData(),
                 "review_smart": review_smart.isChecked(),
                 "review_core_enabled": review_core.isChecked(),
-                "review_main_deck": main_review_deck.currentData(),
-                "review_book": "",
-                "review_scope_decks": scope_decks_value(),
-                "review_scope_tags": tags_value(),
-                "review_tags_all": bool(tags_match.currentData()),
-                "review_scope_name": scope_name.text().strip(),
-                "review_extra_decks": extra_decks_value(),
+                "study_book": book_value(),
                 "review_position": review_position.currentData(),
                 "review_theme": review_theme.currentData(),
                 "review_modes": review_modes_value(),
@@ -1374,6 +1303,7 @@ def menu_action():
     action.triggered.connect(open_settings)
     review_action = mw.form.menuTools.addAction("单词随身复习：立即弹出一张")
     review_action.triggered.connect(lambda: controller.review.show_next(True))
+    study_book_menu(mw.form.menuTools)
     core_action = mw.form.menuTools.addAction("四六级核心词：补充缺失词汇")
     core_action.triggered.connect(import_core_words)
     browse_action = mw.form.menuTools.addAction("四六级核心词：查看词表")
@@ -1424,9 +1354,16 @@ def setup_cet6_books():
 
 
 def browse_cet6_book(book):
+    cfg = settings()
+    wanted = BOOK_MIGRATION.get(book, book)
+    target = next((item for item in study_books(cfg) if item['id'] == wanted), None)
+    if target is None:
+        show_feedback('没有这本词书。')
+        return
+    query = 'note:"%s"%s' % (str(settings()['model']).replace('\\', '\\\\').replace('"', '\\"'), book_clause(target))
     def work():
         try:
-            api('guiBrowse', {'query': 'tag:' + BOOK_TAGS[book]})
+            api('guiBrowse', {'query': query})
         except Exception as error:
             message = '无法打开词书：%s' % error
             mw.taskman.run_on_main(lambda: show_feedback(message, period=10000))
@@ -1459,40 +1396,60 @@ def browse_core_words():
 def add_review_to_toolbar(links, toolbar):
     # Links are rebuilt as HTML strings each time Anki runs this hook, so the current
     # scope can be named here; a saved change shows up on the next toolbar rebuild.
-    scope = scope_label(settings()) or '所选牌组'
+    book = study_book(settings())
+    name = book['name'] if book else '未选词书'
     links.append(toolbar.create_link(
-        'zvr-desktop-review', '开始学习', open_review_from_toolbar,
-        tip='按当前学习范围（%s）立即弹出学习卡' % scope, id='zvr-desktop-review'))
-    links.append(toolbar.create_link(
-        'zvr-cet4-book', '四级范围', lambda: open_kyle_book('cet4_kyle'),
-        tip='把学习范围切到四级标签（跨全部牌组）并开始学习', id='zvr-cet4-book'))
-    links.append(toolbar.create_link(
-        'zvr-cet6-book', '六级范围', lambda: open_kyle_book('cet6_kyle'),
-        tip='把学习范围切到六级标签（跨全部牌组）并开始学习', id='zvr-cet6-book'))
+        'zvr-desktop-review', '开始学习 · %s' % name, open_review_from_toolbar,
+        tip='立即弹出「%s」的学习卡；换词书在 工具 → 切换词书' % name, id='zvr-desktop-review'))
 
 
-def open_kyle_book(book):
-    if mw.col is None or book not in ('cet4_kyle', 'cet6_kyle'):
+def choose_study_book(book_id, start=True):
+    cfg = settings()
+    if mw.col is None or book_id not in {book['id'] for book in study_books(cfg)}:
         show_feedback('请先打开 Anki 账户。')
         return
     if controller.review.dialog or controller.review.busy:
-        show_feedback('请先关闭当前复习卡，再切换学习范围。')
+        show_feedback('请先关闭当前复习卡，再切换词书。')
         return
     cfg = dict(settings())
-    model = cfg['model'].replace('\\', '\\\\').replace('"', '\\"')
-    if not mw.col.find_cards('note:"%s" tag:%s -is:suspended -is:buried' % (model, BOOK_TAGS[book])):
-        show_feedback('这个范围下没有可用卡片，请检查对应标签是否已导入。')
-        return
+    cfg['study_book'] = book_id
     try:
-        cfg['review_book'] = ''
-        cfg['review_scope_tags'] = [BOOK_TAGS[book]]
-        cfg['review_scope_decks'] = []
-        cfg['review_scope_name'] = '四级词汇' if book == 'cet4_kyle' else '六级词汇'
         save_settings(cfg)
     except Exception as error:
-        show_feedback('切换学习范围失败：%s' % error)
+        show_feedback('切换词书失败：%s' % error)
         return
-    controller.review.show_next(True)
+    if start:
+        controller.review.show_next(True)
+
+
+def book_card_count(book):
+    if mw.col is None:
+        return 0
+    query = 'note:"%s"%s -is:suspended -is:buried' % (
+        str(settings()['model']).replace('\\', '\\\\').replace('"', '\\"'), book_clause(book))
+    try:
+        return len(mw.col.find_cards(query))
+    except Exception:
+        return 0
+
+
+def study_book_menu(tools):
+    """Switching books is a daily action, so it sits with the other tools rather than
+    buried in settings. Counts are filled in on open: a book showing zero is exactly
+    the thing that needs to be visible."""
+    menu = tools.addMenu('切换词书')
+
+    def refresh():
+        cfg = settings()
+        current = study_book_id(cfg)
+        menu.clear()
+        for book in study_books(cfg):
+            action = menu.addAction('%s　%d 张' % (book['name'], book_card_count(book)))
+            action.setCheckable(True)
+            action.setChecked(book['id'] == current)
+            action.triggered.connect(lambda _checked=False, key=book['id']: choose_study_book(key))
+    menu.aboutToShow.connect(refresh)
+    return menu
 
 
 def add_study_dashboard(_browser, content):
@@ -1503,13 +1460,12 @@ def add_study_dashboard(_browser, content):
         import datetime
         from aqt.theme import theme_manager
         today = datetime.date.today()
-        plan = collection_plan(lambda _action, params: mw.col.find_cards(params['query']), cfg)
+        plan = collection_plan(collection_api, cfg)
         selected = set()
         escape = lambda value: str(value).replace('\\', '\\\\').replace('"', '\\"')
-        tag_part = ''.join(' tag:"%s"' % escape(tag) for tag in scope_tags(cfg))
-        for deck_name in ([None] if scope_uses_all_decks(cfg) else review_decks(cfg)):
-            deck_part = '' if deck_name is None else 'deck:"%s" ' % escape(deck_name)
-            selected.update(mw.col.find_cards('%snote:"%s"%s' % (deck_part, escape(cfg['model']), tag_part)))
+        base = 'note:"%s"%s -is:suspended -is:buried' % (escape(cfg['model']), book_clause(study_book(cfg)))
+        for deck_name in resolve_book_decks(collection_api, cfg):
+            selected.update(mw.col.find_cards('deck:"%s" %s' % (escape(deck_name), base)))
         start = datetime.datetime.combine(today - datetime.timedelta(days=27), datetime.time.min).timestamp()
         rows = mw.col.db.all('select cid, id from revlog where id >= ?', int(start * 1000))
         activity = activity_counts(rows, selected, today)

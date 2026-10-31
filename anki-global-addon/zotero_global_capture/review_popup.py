@@ -14,7 +14,7 @@ from aqt.qt import (
 )
 
 from .review_logic import (answer_matches, clean_detail, clean_text, cloze_sentence, collection_plan, end_of_session_reason, example_groups, exam_word_labels, format_meaning, link_example_html, literature_example_html, masked_example, mask_answer_clues, meaning_table, next_check_delay, plan_limits_new, root_detail_html,
-                           next_hint_index, prepare_question, scope_label, session_batch_size, should_style_card, spelling_hint, spoken_examples, submit_review, suggested_ease, today_remaining, updated_session_target, window_wait)
+                           next_hint_index, prepare_question, book_label, session_batch_size, should_style_card, spelling_hint, spoken_examples, submit_review, suggested_ease, today_remaining, updated_session_target, window_wait)
 from . import morphology, word_relations
 from .input_mode import ReviewInputMode
 
@@ -119,6 +119,19 @@ def _plain_label(text, name=None):
     if name:
         label.setObjectName(name)
     return label
+
+
+def syllable_display(word):
+    """Real syllable breaks belong on the word itself; a mechanical letter grouping
+    stays down in the detail list, because dressing the word up with something that
+    is not syllables would be worse than not showing it at all."""
+    try:
+        chunks = morphology.spelling_chunks(word)
+    except Exception:
+        return word
+    if chunks and chunks[0] == '音节分段':
+        return '·'.join(chunks[1])
+    return word
 
 
 def _meaning_label(text, name):
@@ -272,12 +285,15 @@ class ReviewDialog(QDialog):
         layout.setContentsMargins(26, 22, 26, 22)
         layout.setSpacing(10)
         top = QHBoxLayout()
-        # The card must say which slice of the collection it came from, so a 四级 and
-        # a 六级 session are tellable at a glance.
-        scope = str(scope_label(self.cfg) or '').strip()
-        kind_text = '新词' if question['kind'] == 'new' else '到期复习'
-        eyebrow = _plain_label('VOCABULARY  ·  %s%s' % (('%s  ·  ' % scope) if scope else '', kind_text), 'eyebrow')
-        eyebrow.setToolTip('学习范围：%s' % (scope or '所选牌组'))
+        # The card must say which book it came from and how far that book has been
+        # studied, so a 四级 and a 六级 session are tellable at a glance.
+        book = book_label(self.cfg)
+        learned, total = self.cfg.get('_book_progress') or (0, 0)
+        parts = [book or '未选词书', ('%d/%d' % (learned, total)) if total else '',
+                 '新词' if question['kind'] == 'new' else '到期复习']
+        eyebrow = _plain_label('VOCABULARY  ·  %s' % '  ·  '.join(part for part in parts if part), 'eyebrow')
+        eyebrow.setToolTip('当前词书：%s%s' % (book or '未选择',
+                                              '，已学 %d / 共 %d' % (learned, total) if total else ''))
         eyebrow.setWordWrap(False)
         top.addWidget(eyebrow, 1)
         menu_button = QPushButton('...')
@@ -796,7 +812,11 @@ class ReviewDialog(QDialog):
                     self.meaning_hint_button.hide()
                 for button in (self.check_button, self.hint_button, self.answer_button):
                     button.hide()
-            self.answer_word.setText(self.question['word'])
+            shown = syllable_display(self.question['word'])
+            self.answer_word.setText(shown)
+            self.answer_word.setToolTip(
+                self.question['word'] if shown == self.question['word']
+                else '%s\n音节分段来源：Moby 音节词表；不代表词根词缀。' % self.question['word'])
             labels = exam_word_labels(self.question['word'])
             if labels:
                 sources = []
@@ -817,10 +837,10 @@ class ReviewDialog(QDialog):
             if breakdown:
                 self.add_detail('拆分记忆', breakdown)
             chunks = morphology.spelling_chunks(self.question['word'])
-            if chunks:
-                title, pieces = chunks
-                note = '来源：Moby 音节词表；不代表词根词缀。' if title == '音节分段' else '按字母机械分组，不代表音节或词根词缀。'
-                self.add_detail(title, ' · '.join(pieces) + '\n' + note)
+            # The syllable form is on the word now, so repeating it below is noise;
+            # only the mechanical letter grouping still earns its own card.
+            if chunks and chunks[0] != '音节分段':
+                self.add_detail(chunks[0], ' · '.join(chunks[1]) + '\n按字母机械分组，不代表音节或词根词缀。')
             contrast = morphology.confusion(self.question['word'])
             if contrast:
                 self.add_detail('易混辨析', contrast)

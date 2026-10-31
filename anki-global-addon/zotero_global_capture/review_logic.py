@@ -315,70 +315,122 @@ def letter_feedback(expected, actual):
 
 
 def should_style_card(deck, model, kind, cfg):
-    return (bool(cfg.get('review_beautify', True)) and kind in ('reviewQuestion', 'reviewAnswer') and
-            any(deck == name or deck.startswith(name + '::') for name in review_decks(cfg)) and
-            model == cfg['model'])
+    if not (cfg.get('review_beautify', True) and kind in ('reviewQuestion', 'reviewAnswer')):
+        return False
+    if model != cfg['model']:
+        return False
+    # Every book is a view over the same note type, so once a book has been resolved
+    # only its decks get restyled; before that, styling by model is the honest guess
+    # rather than leaving the native card unstyled.
+    decks = review_decks(cfg)
+    return not decks or any(deck == name or deck.startswith(name + '::') for name in decks)
 
 
-BOOK_TAGS = {'cet6_core': 'zvr_cet6_core', 'cet6_full': 'zvr_cet6_full',
-             'cet4_kyle': 'zvr_kyle_cet4', 'cet6_kyle': 'zvr_kyle_cet6'}
+# A 词书 is one named view over the collection — the only thing the user picks.
+#
+# Scope is a tag rather than a deck on purpose: 六级核心 ⊂ 六级全表, and a card can
+# only live in one deck, so nested lists cannot be decks. Tags also mean one card
+# keeps one review history no matter which book is showing it. 文献单词 is the
+# exception: it is a source, not a word list, and its cards really are in one deck.
+STUDY_BOOKS = (
+    {'id': 'cet6_core', 'name': '六级核心', 'tag': 'zvr_cet6_core'},
+    {'id': 'cet6_full', 'name': '六级全表', 'tag': 'zvr_cet6_full'},
+    {'id': 'cet4_core', 'name': '四级核心', 'tag': 'zvr_cet4_core'},
+    {'id': 'cet4_full', 'name': '四级全表', 'tag': 'zvr_kyle_cet4'},
+    {'id': 'literature', 'name': '文献单词', 'deck': '文献单词'},
+)
+BOOK_BY_ID = {book['id']: book for book in STUDY_BOOKS}
+# Old configs pointed at the retired 词书 / deck+tag layer; land them on the nearest book.
+BOOK_MIGRATION = {'cet6_core': 'cet6_core', 'cet6_full': 'cet6_full', 'cet4_kyle': 'cet4_full',
+                  'cet6_kyle': 'cet6_full', 'zvr_cet6_core': 'cet6_core', 'zvr_cet6_full': 'cet6_full',
+                  'zvr_cet4_core': 'cet4_core', 'zvr_kyle_cet4': 'cet4_full', 'zvr_kyle_cet6': 'cet6_full',
+                  '文献单词': 'literature'}
 
 
-def _clean_list(value):
-    return [str(item).strip() for item in value if str(item or '').strip()] if isinstance(value, list) else []
+def _escape(value):
+    return str(value).replace('\\', '\\\\').replace('"', '\\"')
 
 
-def scope_tags(cfg):
-    """Tags that narrow the study scope. The old single-select book still resolves."""
-    tags = _clean_list(cfg.get('review_scope_tags'))
-    if tags:
-        return tags
-    legacy = BOOK_TAGS.get(cfg.get('review_book'))
-    return [legacy] if legacy else []
+def study_books(cfg=None):
+    """The catalogue in force.
+
+    Overridable from config so a book can be added without editing the source — the
+    whole complaint about the old 词书 dropdown was that its list was baked in.
+    """
+    return list((cfg or {}).get('study_books') or STUDY_BOOKS)
 
 
-def scope_decks(cfg):
-    """Decks the scope covers. An empty list means every deck that carries the tags."""
-    return _clean_list(cfg.get('review_scope_decks'))
+def study_book_id(cfg):
+    """The chosen book, or None when nothing valid has been picked yet."""
+    value = str(cfg.get('study_book') or '').strip()
+    known = {book['id'] for book in study_books(cfg)}
+    if value in known:
+        return value
+    for legacy in (cfg.get('review_scope_tags'), cfg.get('review_extra_decks')):
+        for item in (legacy if isinstance(legacy, list) else []):
+            mapped = BOOK_MIGRATION.get(str(item).strip())
+            if mapped in known:
+                return mapped
+    return BOOK_MIGRATION.get(str(cfg.get('review_book') or '').strip()) or None
 
 
-def scope_is_all_decks(cfg):
-    return not scope_decks(cfg)
+def study_book(cfg):
+    wanted = study_book_id(cfg)
+    return next((book for book in study_books(cfg) if book['id'] == wanted), None)
 
 
-def tags_clause(cfg):
-    tags = scope_tags(cfg)
-    if not tags:
+def book_clause(book):
+    if not book:
         return ''
-    escape = lambda value: str(value).replace('\\', '\\\\').replace('"', '\\"')
-    # Anki treats several bare tag: terms as OR; AND has to be written out.
-    joiner = ' AND ' if cfg.get('review_tags_all') else ' '
-    return ' ' + joiner.join('tag:"%s"' % escape(tag) for tag in tags)
+    return ' tag:"%s"' % _escape(book['tag']) if book.get('tag') else ' deck:"%s"' % _escape(book['deck'])
 
 
-def scope_label(cfg, deck_names=None):
-    """A human-readable name for what is being studied, shown on the card."""
-    name = str(cfg.get('review_scope_name') or '').strip()
-    if name:
-        return name
-    decks = scope_decks(cfg)
-    if deck_names is not None:
-        decks = [deck for deck in decks if deck in deck_names]
-    tags = [tag[4:] if tag.startswith('zvr_') else tag for tag in scope_tags(cfg)]
-    parts = []
-    if decks:
-        parts.append('、'.join(decks[:2]) + ('' if len(decks) <= 2 else ' 等 %d 个牌组' % len(decks)))
-    if tags:
-        parts.append('、'.join(tags[:2]) + ('' if len(tags) <= 2 else ' 等 %d 个标签' % len(tags)))
-    # Empty when nothing was picked: a placeholder like 所选牌组 on every card is
-    # noise, not information. Callers that need a label of their own decide it.
-    return ' · '.join(parts)
+def book_label(cfg):
+    book = study_book(cfg)
+    return book['name'] if book else ''
+
+
+def resolve_book_decks(api, cfg):
+    """Which decks the chosen book actually spans.
+
+    Anki counts the daily new-card limit per deck, so questions are still drawn deck
+    by deck; this maps the book onto the decks that currently hold it. Cached on cfg
+    because several callers need it within one session.
+    """
+    book = study_book(cfg)
+    if not book:
+        return []
+    if cfg.get('_book_decks_key') == book['id'] and isinstance(cfg.get('_book_decks'), list):
+        return cfg['_book_decks']
+    if book.get('deck'):
+        decks = [book['deck']] if book['deck'] in set(api('deckNames', {}) or []) else []
+    else:
+        available = sorted(api('deckNames', {}) or [])
+        decks = [deck for deck in available
+                 if api('findCards', {'query': 'deck:"%s" note:"%s"%s -is:suspended -is:buried'
+                                            % (_escape(deck), _escape(cfg['model']), book_clause(book))})]
+    cfg['_book_decks'] = decks
+    cfg['_book_decks_key'] = book['id']
+    return decks
+
+
+def book_progress(api, cfg):
+    """(learned, total) for the book. 'learned' means the card has been answered at
+    least once — the wording the user picked, and deliberately not 'mature'."""
+    book = study_book(cfg)
+    if not book:
+        return (0, 0)
+    base = 'note:"%s"%s -is:suspended -is:buried' % (_escape(cfg['model']), book_clause(book))
+    total = len(api('findCards', {'query': base}) or [])
+    learned = len(api('findCards', {'query': base + ' prop:reps:>0'}) or [])
+    return (learned, total)
 
 
 def _search(cfg, all_decks=False):
-    escape = lambda value: str(value).replace('\\', '\\\\').replace('"', '\\"')
-    deck = '' if all_decks else 'deck:"%s" ' % escape(cfg['deck'])
-    return '%snote:"%s"%s -is:suspended -is:buried' % (deck, escape(cfg['model']), tags_clause(cfg))
+    book = study_book(cfg)
+    deck = '' if all_decks else 'deck:"%s" ' % _escape(cfg['deck'])
+    clause = '' if book and book.get('deck') and cfg['deck'] == book['deck'] else book_clause(book)
+    return '%snote:"%s"%s -is:suspended -is:buried' % (deck, _escape(cfg['model']), clause)
 
 
 def _stats(api, deck):
@@ -575,31 +627,21 @@ def end_of_session_reason(plan, limits_new):
 
 
 def review_decks(cfg):
-    scope = scope_decks(cfg)
-    if scope:
-        return scope
-    selected = cfg.get('review_extra_decks')
-    if not isinstance(selected, list):
-        selected = [cfg.get('review_extra_deck', '')]
-    result = [cfg.get('review_main_deck') or cfg['deck']]
-    for value in selected:
-        name = str(value or '').strip()
-        if name and name not in result:
-            result.append(name)
-    return result
-
-
-def scope_uses_all_decks(cfg):
-    """Tags alone define the scope, so every deck carrying them is searched."""
-    return scope_is_all_decks(cfg) and bool(scope_tags(cfg))
+    """The decks the chosen book spans. Empty until a book is picked or resolved —
+    there is no longer a free-standing deck list in the settings."""
+    decks = cfg.get('_book_decks')
+    if isinstance(decks, list):
+        return decks
+    book = study_book(cfg)
+    return [book['deck']] if book and book.get('deck') else []
 
 
 def collection_plan(api, cfg, now=None):
     now = now or datetime.datetime.now()
-    decks = review_decks(cfg)
+    decks = resolve_book_decks(api, cfg)
     found = {'new': set(), 'due': set(), 'done': set(), 'introduced': set()}
-    for deck in ([None] if scope_uses_all_decks(cfg) else decks):
-        base = _search(dict(cfg, deck=deck), all_decks=deck is None)
+    for deck in decks:
+        base = _search(dict(cfg, deck=deck))
         for key, suffix in (('new', 'is:new'), ('due', 'is:due -is:new'), ('done', 'rated:1'), ('introduced', 'introduced:1')):
             found[key].update(api('findCards', {'query': base + ' ' + suffix}) or [])
     hours = (remaining_window_minutes(now, cfg.get('review_windows', [])) / 60
@@ -688,11 +730,9 @@ def distractor_candidates(target, cards, cfg, mode, rng):
 def prepare_question(api, cfg, mode='mixed', rng=random, due_only=False):
     profile = api('getActiveProfile', {})
     available = set(api('deckNames', {}) or [])
-    if scope_uses_all_decks(cfg):
-        decks = [deck for deck in sorted(available)
-                 if api('findCards', {'query': _search(dict(cfg, deck=deck))})]
-    else:
-        decks = [deck for deck in review_decks(cfg) if deck == cfg['deck'] or deck in available]
+    decks = [deck for deck in resolve_book_decks(api, cfg) if deck in available]
+    if not decks:
+        raise ValueError('这个词书下没有可弹出的卡片，换一个词书试试。')
     deck_cfgs = [dict(cfg, deck=deck) for deck in decks]
     stats_by_deck = [_stats(api, deck) for deck in decks]
     captures = _captured_words(api, cfg)
@@ -840,8 +880,9 @@ def submit_review(api, cfg, question, ease, answer=None):
     if api('getActiveProfile', {}) != question['profile']:
         raise ValueError('Anki 账户已切换，这张卡片不会被评分。')
     deck = question.get('review_deck', cfg['deck'])
-    if not scope_uses_all_decks(cfg) and deck not in review_decks(cfg):
-        raise ValueError('复习牌组已改变，请在下次提醒时复习。')
+    decks = review_decks(cfg)
+    if decks and deck not in decks:
+        raise ValueError('词书或牌组已改变，这张卡不在当前词书里，请在下次提醒时复习。')
     cfg = dict(cfg, deck=deck)
     current = api('cardsInfo', {'cards': [question['card_id']]}) or []
     if not current or any(current[0].get(key) != value for key, value in question['snapshot'].items()):

@@ -54,7 +54,12 @@ class FakeAnki:
         raise AssertionError(action)
 
 
-CFG = {'deck': 'Literature', 'model': 'Words', 'front_field': 'Front', 'back_field': 'Back'}
+# The catalogue is normally the real word lists; tests bring their own so they are not
+# pinned to production tag names. A deck book whose deck equals cfg['deck'] keeps the
+# generated queries identical to the pre-book ones.
+CFG = {'deck': 'Literature', 'model': 'Words', 'front_field': 'Front', 'back_field': 'Back',
+       'study_book': 'literature',
+       'study_books': [{'id': 'literature', 'name': '文献单词', 'deck': 'Literature'}]}
 
 
 class ReviewLogicTests(unittest.TestCase):
