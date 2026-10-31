@@ -488,13 +488,16 @@ class ReviewDialog(QDialog):
         grade_layout = QHBoxLayout(self.grade_widget)
         grade_layout.setContentsMargins(0, 0, 0, 0)
         self.grade_buttons = []
-        for caption, ease in [('再练一次', 1), ('困难', 2), ('记住了', 3), ('很容易', 4)]:
-            button = QPushButton(caption)
+        for letter, (caption, ease) in enumerate((('再练一次', 1), ('困难', 2), ('记住了', 3), ('很容易', 4))):
+            button = QPushButton()
+            button.setProperty('gradeCaption', caption)
+            button.setProperty('gradeEase', ease)
             if ease == 3:
                 button.setObjectName('primary')
             button.clicked.connect(lambda _checked=False, value=ease: self.start_grade(value))
             self.grade_buttons.append(button)
             grade_layout.addWidget(button)
+        self.label_grade_buttons()
         self.grade_widget.hide()
         layout.addWidget(self.grade_widget)
         self.later = QPushButton('稍后再说')
@@ -728,6 +731,11 @@ class ReviewDialog(QDialog):
                 self.choice_buttons[index].click()
                 event.accept()
                 return True
+        if self.answer_shown and event.type() == QEvent.Type.KeyPress and event.modifiers() == Qt.KeyboardModifier.NoModifier:
+            index = event.key() - Qt.Key.Key_A
+            if 0 <= index < 4 and self.grade_with_letter(index):
+                event.accept()
+                return True
         if self.answer_shown and event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             if not self.grading and self.enter_ease is not None:
                 self.start_grade(self.enter_ease)
@@ -838,16 +846,19 @@ class ReviewDialog(QDialog):
             if correct is None:
                 self.status.setText('请听发音并选择评分；此题不会自动识别或上传语音。')
             elif not correct:
-                self.status.setText('回答错误或已查看答案：按“再练一次”记录。回车继续。')
+                self.status.setText('回答错误或已查看答案：按 A 记录并继续（回车同样）。')
             else:
-                self.status.setText('错误字母 %d 次，提示 %d 次，检查失败 %d 次；建议“%s”，回车继续，也可自行评分。' %
+                self.status.setText('错误字母 %d 次，提示 %d 次，检查失败 %d 次；建议“%s”，回车继续，也可按 A–D 自行评分。' %
                                     (self.incorrect_letters, self.hint_uses, self.failed_attempts, rating_name))
             self.grade_widget.show()
             if self.force_again:
-                self.grade_buttons[0].setText('再练一次并继续')
+                # A wrong answer may only record Again, then offers 继续学习; the other
+                # three eases would invite a rating Anki is not allowed to take.
+                self.grade_buttons[0].setProperty('gradeCaption', '再练一次并继续')
+                self.grade_buttons[2].setProperty('gradeCaption', '继续学习')
                 self.grade_buttons[1].hide()
-                self.grade_buttons[2].setText('继续学习')
                 self.grade_buttons[3].hide()
+            self.label_grade_buttons()
             self.later.setText('不评分，结束')
             for widget in [self] + self.findChildren(QWidget):
                 widget.installEventFilter(self)
@@ -861,6 +872,27 @@ class ReviewDialog(QDialog):
         speech.extend(spoken_examples(self.question.get('example', ''), self.question.get('literature', ''), mode))
         if any(speech):
             self.speak_many(speech)
+
+    def visible_grade_buttons(self):
+        """The grade row as it actually stands. A wrong answer collapses it to two
+        buttons, and then A and B have to mean those two rather than leave D dead."""
+        return [button for button in self.grade_buttons if not button.isHidden()]
+
+    def label_grade_buttons(self):
+        # The choice options are stacked one per row and can carry their letter; four
+        # rating buttons share one row, and prefixing them pushed the card from 510 to
+        # 536 wide on flip. So the shortcut lives in the tooltip and the status line,
+        # which cost no layout, and the letters still name the visible row in order.
+        for letter, button in zip('ABCD', self.visible_grade_buttons()):
+            button.setText(str(button.property('gradeCaption')))
+            button.setToolTip('按 %s 选择「%s」' % (letter, button.property('gradeCaption')))
+
+    def grade_with_letter(self, index):
+        buttons = self.visible_grade_buttons()
+        if index < len(buttons):
+            buttons[index].click()
+            return True
+        return False
 
     def start_grade(self, ease):
         if self.grading:
