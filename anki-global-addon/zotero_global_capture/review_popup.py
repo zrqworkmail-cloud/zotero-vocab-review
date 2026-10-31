@@ -41,6 +41,12 @@ QPushButton:hover { background: #eef2ff; border-color: #8996e8; }
 QPushButton:disabled { color: #8c98aa; background: #f0f2f6; }
 QPushButton#primary { background: #5668ca; color: white; border: none; text-align: center; font-weight: 600; }
 QPushButton#primary:hover { background: #4557b5; }
+/* The suggestion is an outline, so it reads as "Enter would use this" rather than
+   "this is already decided". Only the button the user actually picks fills in. */
+QPushButton#suggest { background: #eef2ff; color: #27344d; border: 1px solid #8996e8; text-align: center; }
+QPushButton#suggest:hover, QPushButton#suggest:focus { background: #e3eafd; border-color: #5668ca; }
+QPushButton#chosen { background: #5668ca; color: white; border: 1px solid #4557b5; text-align: center; font-weight: 600; }
+QPushButton#chosen:disabled { background: #5668ca; color: white; }
 QPushButton#secondary { background: transparent; border: none; color: #728096; text-align: center; }
 QLineEdit { background: white; color: #172554; border: 1px solid #dce4f1; border-radius: 10px;
             padding: 10px 12px; font-size: 16px; }
@@ -66,6 +72,7 @@ _DARK_COLORS = {
     '#27344d': '#e2e9f6', '#ffffff': '#252e40', '#e0e7f2': '#47556c',
     '#66758d': '#b2bfd2', '#64749a': '#b9c8e7', '#dce4f1': '#4a5971',
     '#eef2ff': '#34415d', '#8996e8': '#aab8ff', '#8c98aa': '#aab4c5',
+    '#e3eafd': '#3d4a6b',
     '#f0f2f6': '#343d4c', '#5668ca': '#596dd1', '#4557b5': '#6e80df',
     '#728096': '#b5c0d1', '#7080dd': '#aab8ff', 'background: white': 'background: #252e40',
 }
@@ -492,8 +499,6 @@ class ReviewDialog(QDialog):
             button = QPushButton()
             button.setProperty('gradeCaption', caption)
             button.setProperty('gradeEase', ease)
-            if ease == 3:
-                button.setObjectName('primary')
             button.clicked.connect(lambda _checked=False, value=ease: self.start_grade(value))
             self.grade_buttons.append(button)
             grade_layout.addWidget(button)
@@ -839,7 +844,7 @@ class ReviewDialog(QDialog):
             self.answer_scroll.show()
             self.force_again = correct is False
             for index, button in enumerate(self.grade_buttons, 1):
-                button.setObjectName('primary' if index == self.enter_ease else '')
+                button.setObjectName('suggest' if index == self.enter_ease else '')
                 button.style().unpolish(button)
                 button.style().polish(button)
             rating_name = {1: '再练一次', 2: '困难', 3: '记住了', 4: '很容易'}.get(self.enter_ease)
@@ -897,9 +902,19 @@ class ReviewDialog(QDialog):
     def start_grade(self, ease):
         if self.grading:
             return
+        # Fill in the button the user actually picked before anything else changes, so a
+        # keyboard rating is visibly theirs rather than the card's pre-selection. Match
+        # on the requested ease, not the recorded one: a wrong answer forces Again no
+        # matter which of the two collapsed buttons was pressed.
+        chosen = next((button for button in self.grade_buttons
+                       if button.property('gradeEase') == ease and not button.isHidden()), None)
+        for button in self.grade_buttons:
+            button.setObjectName('chosen' if button is chosen else '')
+            button.style().unpolish(button)
+            button.style().polish(button)
+        self.grading = True
         if self.force_again:
             ease = 1
-        self.grading = True
         for button in self.grade_buttons:
             button.setEnabled(False)
         self.later.setEnabled(False)

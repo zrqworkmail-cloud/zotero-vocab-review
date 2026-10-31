@@ -81,6 +81,11 @@ assert [b.text() for b in visible(dialog)] == ['再练一次', '困难', '记住
 assert letters(dialog) == ['A', 'B', 'C', 'D'], letters(dialog)
 assert 'A–D' in dialog.status.text(), dialog.status.text()
 taken = graded_by(dialog)
+# Before anything is pressed the row must read as "Enter would use this", not as a
+# decision already made: exactly one outlined suggestion, nothing filled in.
+assert [b.objectName() for b in dialog.grade_buttons].count('suggest') == 1, \
+    [b.objectName() for b in dialog.grade_buttons]
+assert 'chosen' not in [b.objectName() for b in dialog.grade_buttons]
 for letter, ease in ((Qt.Key.Key_A, 1), (Qt.Key.Key_B, 2), (Qt.Key.Key_C, 3), (Qt.Key.Key_D, 4)):
     # start_grade latches the row; rewind it the way the next card would.
     dialog.grading = False
@@ -88,6 +93,11 @@ for letter, ease in ((Qt.Key.Key_A, 1), (Qt.Key.Key_B, 2), (Qt.Key.Key_C, 3), (Q
         button.setEnabled(True)
     QTest.keyClick(dialog, letter)
     app.processEvents(); QTest.qWait(40)
+    names = [b.objectName() for b in dialog.grade_buttons]
+    assert names[ease - 1] == 'chosen', '%s filled in the wrong button: %s' % (chr(65 + ease - 1), names)
+    assert names.count('chosen') == 1 and 'suggest' not in names, \
+        'the suggestion must give way to the button actually picked: %s' % names
+    assert not dialog.grade_buttons[ease - 1].isEnabled(), 'a chosen button must still be locked against a second rating'
 assert taken == [1, 2, 3, 4], 'A/B/C/D must map to the four ratings in order, got %s' % taken
 # Showing the rating row must not resize the card: the buttons share one row, so
 # giving them letters used to push the card from 510 to 536 wide mid-flip.
