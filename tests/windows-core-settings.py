@@ -108,38 +108,42 @@ open_and(pick_tags)
 check(sorted(saved[-1]['review_scope_tags'])==['zvr_kyle_cet4','zvr_kyle_cet6','工作/学习'],'tag selection must save, got %s' % saved[-1]['review_scope_tags'])
 check(saved[-1]['review_tags_all'] is True and saved[-1]['review_scope_name']=='四级 + 六级','match mode and name must round-trip')
 
-# 3. With the new keys in place, a stale legacy review_extra_decks entry is not
-#    consulted, so it must not block saving nor show up as a phantom checkbox.
+# 3. A deck the saved config still names but which no longer exists must not clutter
+#    the picker — it matches nothing either way — and must not block saving.
 cfg.update(saved[-1]);cfg.update(review_extra_decks=['missing deck']);saved.clear()
 def stale_legacy():
  d=dialog_now()
- check('missing deck' not in [x.property('deckName') for x in deck_boxes(d)],'a superseded legacy deck must not reappear in the list')
- check(save_button(d).isEnabled(),'stale legacy extras alone must not block saving')
+ check('missing deck' not in [x.property('deckName') for x in deck_boxes(d)],'a deleted deck must not be listed')
+ check(save_button(d).isEnabled(),'a deleted deck alone must not block saving')
  save_button(d).click()
 open_and(stale_legacy)
 check(bool(saved) and saved[-1]['review_scope_name']=='四级 + 六级','saving must still work')
+check('missing deck' not in saved[-1]['review_scope_decks'],'saving must not resurrect a deleted deck')
 
-# 4. A deck missing from the collection *inside the new scope* must be listed, marked,
-#    and block saving, or the user studies a scope that is not there.
-cfg.update(saved[-1]);cfg.update(review_scope_decks=['四六级核心词汇','已删除的牌组']);saved.clear()
+# 4. Dropped decks are named in the help text, so the scope does not change quietly,
+#    and saving rewrites the scope without them.
+cfg.update(saved[-1]);cfg.update(review_scope_decks=['四六级核心词汇','已删除的牌组'],review_main_deck='已删除的牌组');saved.clear()
 def stale_scope():
  d=dialog_now()
- ghost=next((x for x in deck_boxes(d) if x.property('deckName')=='已删除的牌组'),None)
- check(ghost is not None,'a missing deck in scope must still be listed')
- check(ghost is not None and '未找到' in ghost.text(),'it must be marked 未找到, got %r' % (ghost and ghost.text()))
- # Tags carry the scope, so a dead deck among them is tolerated but must be shown.
- check(ghost is not None and save_button(d).isEnabled(),'with tags in scope a dead deck is tolerated, not fatal')
- d.reject()
+ names=[x.property('deckName') for x in deck_boxes(d)]
+ check('已删除的牌组' not in names,'a missing deck must not be listed, got %s' % names)
+ help_text=d.findChild(QLabel,'scopeHelp').text()
+ check('已删除的牌组' in help_text,'the help line should say which deck was dropped, got %r' % help_text)
+ check(save_button(d).isEnabled(),'a deleted deck must not block saving')
+ save_button(d).click()
 open_and(stale_scope)
+check(saved[-1]['review_scope_decks'] and '已删除的牌组' not in saved[-1]['review_scope_decks'],
+   'saving must rewrite the scope without the deleted deck, got %s' % saved[-1]['review_scope_decks'])
 
-# 5. Without tags the decks alone define the scope, so a dead one has to block saving.
-cfg.update(review_scope_tags=[], review_tags_all=False)
-def stale_scope_no_tags():
+# 5. Even with no tags the deleted main deck must not come back.
+cfg.update(saved[-1]);cfg.update(review_scope_tags=[], review_tags_all=False)
+def no_tags_left():
  d=dialog_now()
- ghost=next((x for x in deck_boxes(d) if x.property('deckName')=='已删除的牌组'),None)
- check(ghost is not None and not save_button(d).isEnabled(),'a dead deck must block saving when no tags carry the scope')
+ check('已删除的牌组' not in [x.property('deckName') for x in deck_boxes(d)],'still absent without tags')
+ check(d.findChild(QComboBox,'mainReviewDeck').currentData() in [x.property('deckName') for x in deck_boxes(d)],
+    'the main deck must be a deck that exists')
  d.reject()
-open_and(stale_scope_no_tags)
+open_and(no_tags_left)
 
 # 6. A scope that was saved as "all decks, filtered by tag" must come back that way,
 #    with the now-meaningless deck list visibly disabled rather than silently applied.

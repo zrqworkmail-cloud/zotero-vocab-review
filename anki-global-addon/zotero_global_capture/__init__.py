@@ -117,15 +117,18 @@ def save_settings(value):
 
 
 def local_tags():
-    """Every tag actually present in this collection, read through Anki's own
-    connection so unsaved-to-disk work is included. Never raises."""
+    """Every tag registered in this collection, read through Anki's own tag API.
+
+    Querying the tags table by SQL is wrong — it has no `name` column — and because
+    the exception used to be swallowed here the settings list silently emptied
+    instead of failing loudly. None now means "could not read", so the dialog can
+    say that rather than claim the account has no tags.
+    """
     try:
-        rows = mw.col.db.all("select name from tags")
+        return sorted(str(tag) for tag in mw.col.tags.all())
     except Exception as error:
         log_runtime("tag list unavailable: %s" % type(error).__name__)
-        return []
-    tags = {str(row[0] if isinstance(row, (list, tuple)) else row).strip() for row in rows or []}
-    return sorted(tag for tag in tags if tag)
+        return None
 
 
 def format_shortcut(modifiers, virtual_key):
@@ -790,19 +793,22 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     back.setObjectName('reviewBackField')
     deck_names = [item.name for item in mw.col.decks.all_names_and_ids(include_filtered=False)]
     model_names = [item.name for item in mw.col.models.all_names_and_ids()]
-    def populate(combo, names, selected, optional=False):
+    def populate(combo, names, selected, optional=False, keep_missing=True):
         combo.clear()
         if optional:
             combo.addItem('不使用补充牌组', '')
         for name in names:
             combo.addItem(name, name)
-        if selected and selected not in names:
+        # The capture deck keeps its dead entry: silently moving where new words land
+        # is worse than an ugly dropdown. The review deck drops it — it only ever
+        # matched nothing, and the note under the picker says so.
+        if keep_missing and selected and selected not in names:
             combo.addItem('%s（未找到）' % selected, selected)
         combo.setCurrentIndex(max(0, combo.findData(selected)))
     populate(deck, deck_names, cfg['deck'])
     main_review_deck = QComboBox()
     main_review_deck.setObjectName('mainReviewDeck')
-    populate(main_review_deck, deck_names, cfg.get('review_main_deck') or cfg['deck'])
+    populate(main_review_deck, deck_names, cfg.get('review_main_deck') or cfg['deck'], keep_missing=False)
     populate(model, model_names, cfg['model'])
     def fields_for_model():
         note_type = mw.col.models.by_name(model.currentData()) if model.currentData() in model_names else None
@@ -973,20 +979,22 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     scope_name.setText(str(cfg.get('review_scope_name') or ''))
     scope_name.setPlaceholderText('留空则按牌组和标签自动命名')
     chosen_tags = set(scope_tags(cfg))
+    available_tags = local_tags()
     tag_choices = QWidget()
     tag_choices.setObjectName('reviewScopeTags')
     tag_choices_layout = QVBoxLayout(tag_choices)
     tag_choices_layout.setContentsMargins(0, 0, 0, 0)
     tag_choices_layout.setSpacing(3)
     tag_checks = []
-    for tag in sorted(set(local_tags()) | chosen_tags):
+    for tag in sorted(set(available_tags or ()) | chosen_tags):
         check = QCheckBox(tag)
         check.setProperty('tagName', tag)
         check.setChecked(tag in chosen_tags)
         tag_choices_layout.addWidget(check)
         tag_checks.append(check)
     if not tag_checks:
-        tag_choices_layout.addWidget(QLabel('这个账户还没有任何标签。'))
+        tag_choices_layout.addWidget(QLabel('读不到标签列表：请重开 Anki 再试。' if available_tags is None
+                                            else '这个账户还没有任何标签。'))
     tag_scroll = QScrollArea()
     tag_scroll.setObjectName('reviewScopeTagsScroll')
     tag_scroll.setWidgetResizable(True)
@@ -1009,14 +1017,19 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     review_smart = QCheckBox("到期单词提前提醒（每 5 分钟检查）")
     review_smart.setChecked(bool(cfg["review_smart"]))
     selected_decks = review_decks(cfg)
+    # Only decks that actually exist. A saved reference to a deleted deck matches
+    # nothing, so listing it as 未找到 just cluttered the picker; it is dropped on
+    # save and named in the note below instead.
+    dropped_decks = sorted({name for name in ([cfg.get('review_main_deck')] + list(selected_decks))
+                            if name and name not in deck_names})
     deck_choices = QWidget()
     deck_choices.setObjectName('reviewExtraDeck')
     deck_choices_layout = QVBoxLayout(deck_choices)
     deck_choices_layout.setContentsMargins(0, 0, 0, 0)
     deck_choices_layout.setSpacing(3)
     deck_checks = []
-    for name in list(deck_names) + [name for name in selected_decks if name not in deck_names]:
-        check = QCheckBox(name if name in deck_names else name + '（未找到）')
+    for name in deck_names:
+        check = QCheckBox(name)
         check.setProperty('deckName', name)
         check.setChecked(name in selected_decks)
         deck_choices_layout.addWidget(check)
@@ -1034,7 +1047,7 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
         for check in deck_checks:
             name = check.property('deckName')
             main = name == main_review_deck.currentData()
-            check.setText(name + ('（主牌组）' if main else '' if name in deck_names else '（未找到）'))
+            check.setText(name + ('（主牌组）' if main else ''))
             if main:
                 check.setChecked(True)
             check.setEnabled(not main and not all_decks.isChecked())
@@ -1095,7 +1108,9 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     form.addRow("学习标签（可多选）", tag_scroll)
     form.addRow("标签匹配", tags_match)
     form.addRow("", all_decks)
-    extra_help = QLabel("牌组和标签共同决定学什么：勾选的牌组限定范围，选中的标签在其上再过滤（牌组都不选＝全部牌组按标签跨牌组查找）。只统计上方所选笔记类型。每日新卡上限按牌组计，由 Anki 控制，不是由这里的计划决定。")
+    extra_help = QLabel("牌组和标签共同决定学什么：勾选的牌组限定范围，选中的标签在其上再过滤；勾选“不限牌组”则跨全部牌组按标签查找。只统计上方所选笔记类型。每日新卡上限按牌组计，由 Anki 控制，不是由这里的计划决定。"
+                        + ('已保存的 %s 在本账户中不存在，已从列表移除，保存后不再引用。' % '、'.join(dropped_decks) if dropped_decks else ''))
+    extra_help.setObjectName('scopeHelp')
     extra_help.setWordWrap(True)
     form.addRow(extra_help)
     form.addRow("后台运行", review_start_at_login)
@@ -1152,8 +1167,6 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
             problems.append('请至少选择一种练习形式。')
         if not shortcut.valid:
             problems.append('请重新录入有效的快捷键。')
-        if not tags_value() and any(name not in deck_names for name in scope_decks_value()):
-            problems.append('请取消选择未找到的复习牌组。')
         if all_decks.isChecked() and not tags_value():
             problems.append('不限牌组需要至少勾选一个标签，否则范围会是整个账户。')
         if plan_mode.currentData() == 'daily' and daily_goal.value() == 0:
