@@ -12,7 +12,12 @@ Keeping the decisions in plain arithmetic means the complaints a user can actual
 what `timeline()` returns.
 """
 
-FAST_SECONDS = 3.0
+FAST_SECONDS = 6.0
+# The three question types that are answered by typing letters into the shared boxes. The
+# celebration used to cover `typing` only, which meant a cloze card hopped every letter and
+# then said nothing — and in a whole day of real studying that scope produced 6 celebrations
+# out of 134 cards (2026-11-04), which is why the user asked for it to be widened.
+SPELLING_MODES = ('typing', 'cloze', 'listening')
 MODES = ('full', 'calm', 'off')
 DEFAULT_MODE = 'full'
 
@@ -42,11 +47,13 @@ def mode(cfg):
 def tier_for(question_mode, correct, incorrect_letters=0, hints=0, failed_checks=0, seconds=None):
     """Grade the spelling attempt into 1..4, or 0 for "do not celebrate".
 
-    Only the spelling card celebrates: a choice card answered in 0.4 秒 is a guess or a
-    recognition, not proof of spelling, and confetti there would be noise. A hint or a failed
-    check drops to the gentlest tier no matter how fast it was, because the answer was helped.
+    Every mode answered by typing letters into the shared boxes can celebrate: producing the
+    spelling is the evidence, whether the prompt was the meaning, a blanked sentence or the
+    audio. A choice card answered in 0.4 秒 is recognition, not spelling, and judgment is left
+    out — with two options a fast right answer is a coin flip. A hint or a failed check drops
+    to the gentlest tier no matter how fast it was, because the answer was helped.
     """
-    if question_mode != 'typing' or not correct:
+    if question_mode not in SPELLING_MODES or not correct:
         return 0
     if hints or failed_checks:
         return 4
@@ -68,13 +75,17 @@ def tier_caption(tier):
 
 
 def shows_sparks(tier):
-    """The 8-ray burst belongs to a clean recall, not to every correct answer."""
-    return int(tier) in (1, 2)
+    """Rays for anything that was spelled out cleanly enough to be worth a second look."""
+    return int(tier) in (1, 2, 3)
 
 
 def shows_confetti(tier):
-    """Falling paper is the reward for the rarest case only."""
-    return int(tier) == 1
+    """Paper for the two no-hint tiers.
+
+    It used to be tier 1 alone, and tier 1 never fired in a day of real studying, so the
+    festive half of the celebration was unreachable. 不错 — a hint was used — stays a pill.
+    """
+    return int(tier) in (1, 2)
 
 
 def shows_celebration(tier, setting_mode=None):

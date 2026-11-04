@@ -17,21 +17,28 @@ spec.loader.exec_module(motion)
 
 
 class Tier(unittest.TestCase):
-    def test_only_spelling_celebrates(self):
-        # The user asked for this on 拼写题; a choice card answered in half a second is not
-        # evidence of spelling skill, and it must not startle them with confetti.
-        self.assertEqual(motion.tier_for('typing', True, seconds=1.2), 1)
-        for mode in ('choice', 'cloze', 'listening', 'judgment', 'reverse', 'speaking'):
+    def test_every_mode_where_letters_are_typed_celebrates(self):
+        # The letter boxes are shared by typing, cloze and listening, so those three are one
+        # experience to the learner. Celebrating only `typing` meant the letters hopped on a
+        # cloze card and then nothing came — measured 2026-11-04: 6 celebrations in 134 cards.
+        for mode in ('typing', 'cloze', 'listening'):
+            self.assertEqual(motion.tier_for(mode, True, seconds=1.2), 1, mode)
+
+    def test_recognition_and_spoken_modes_do_not_celebrate(self):
+        # Picking the right meaning or saying it aloud is not producing the spelling.
+        for mode in ('choice', 'judgment', 'reverse', 'speaking'):
             self.assertEqual(motion.tier_for(mode, True, seconds=0.1), 0, mode)
 
     def test_a_flawless_fast_spelling_is_the_top_tier(self):
         self.assertEqual(motion.tier_for('typing', True, incorrect_letters=0, hints=0,
-                                         failed_checks=0, seconds=2.9), 1)
+                                         failed_checks=0, seconds=5.9), 1)
         self.assertEqual(motion.tier_for('typing', True, incorrect_letters=0, hints=0,
-                                         failed_checks=0, seconds=3.0), 1)
-        # One second over the line and the same answer is merely 完美.
+                                         failed_checks=0, seconds=6.0), 1)
+        # Over the line and the same answer is merely 完美 — the bar moved from 3 秒 because
+        # at 3 秒 it never fired in a whole day of real studying.
         self.assertEqual(motion.tier_for('typing', True, incorrect_letters=0, hints=0,
-                                         failed_checks=0, seconds=3.1), 2)
+                                         failed_checks=0, seconds=6.1), 2)
+        self.assertEqual(motion.FAST_SECONDS, 6.0)
 
     def test_a_single_corrected_slip_is_one_tier_down(self):
         self.assertEqual(motion.tier_for('typing', True, incorrect_letters=1, hints=0,
@@ -62,13 +69,16 @@ class Labels(unittest.TestCase):
 
 
 class WhatEachTierDraws(unittest.TestCase):
-    def test_sparks_are_for_the_top_two_and_confetti_only_for_the_top(self):
-        self.assertTrue(motion.shows_sparks(1))
-        self.assertTrue(motion.shows_sparks(2))
-        self.assertFalse(motion.shows_sparks(3))
+    def test_the_decoration_reaches_more_of_the_ladder(self):
+        # Confetti was top-tier only, and the top tier never fired in a day, so nobody ever
+        # saw the festive part. It now covers the two clean-recall tiers; sparks reach one
+        # tier lower. 不错 (a hint was used) stays a plain pill.
+        for tier in (1, 2, 3):
+            self.assertTrue(motion.shows_sparks(tier), tier)
         self.assertFalse(motion.shows_sparks(4))
-        self.assertTrue(motion.shows_confetti(1))
-        for tier in (2, 3, 4):
+        for tier in (1, 2):
+            self.assertTrue(motion.shows_confetti(tier), tier)
+        for tier in (3, 4):
             self.assertFalse(motion.shows_confetti(tier), tier)
 
     def test_calm_mode_keeps_the_badge_and_the_letter_hop_but_drops_the_deco(self):

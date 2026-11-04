@@ -19,30 +19,30 @@ Three decisions are baked in here and are worth knowing before changing anything
 import math
 
 try:  # pragma: no cover - the import list depends on the Anki build
-    from aqt.qt import QColor, QFont, QPainter, QPainterPath, QRectF, Qt, QVariantAnimation, QWidget
+    from aqt.qt import QColor, QFont, QPainter, QPainterPath, QPen, QRectF, Qt, QVariantAnimation, QWidget
 except ImportError:  # an older aqt.qt shim may not re-export every name
     from PyQt6.QtCore import QRectF, Qt, QVariantAnimation
-    from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath
+    from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
     from PyQt6.QtWidgets import QWidget
 
 from .card_motion import (TIMING, shows_confetti, shows_sparks, tier_caption, tier_label,
                           total_ms)
 
-BADGE_HEIGHT = 52
+BADGE_HEIGHT = 64
 BADGE_FONT_PX = 26
 CAPTION_FONT_PX = 11
-SPARK_REACH = 132
-CONFETTI_FALL = 300
+BADGE_TOP_FRACTION = 0.68
+SPARK_REACH = 150
+SPARK_SIZE = 13
+CONFETTI_FALL = 340
 # Fixed layouts instead of random ones: the same tier should look the same every time, and a
 # deterministic particle set is what lets the offscreen check assert on it.
 SPARK_ANGLES = tuple(range(0, 360, 45))
-CONFETTI_SLOTS = (-150, -122, -96, -70, -44, -18, 8, 34, 60, 86, 112, 138, 164, 190)
-
-
-def _ease_out_back(progress):
-    """The overshoot that makes a landing read as a landing (Qt's OutBack, in plain math)."""
-    c1, c3 = 1.70158, 2.70158
-    return 1 + c3 * (progress - 1) ** 3 + c1 * (progress - 1) ** 2
+CONFETTI_SLOTS = (-196, -160, -128, -96, -64, -32, 0, 30, 62, 94, 126, 158, 186, 210)
+# Each piece starts a little later than the one before it. Without the stagger every piece
+# shares one height at any given moment, which rendered as a line of debris across the card
+# rather than paper falling.
+CONFETTI_STAGGER = 0.045
 
 
 class Celebration(QWidget):
@@ -102,13 +102,24 @@ class Celebration(QWidget):
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        centre = self.rect().center()
+        anchor = self._anchor()
         if self.with_confetti:
-            self._paint_confetti(painter, centre)
+            self._paint_confetti(painter, anchor)
         if self.with_sparks:
-            self._paint_sparks(painter, centre)
-        self._paint_badge(painter, centre)
+            self._paint_sparks(painter, anchor)
+        self._paint_badge(painter, anchor)
         painter.end()
+
+    def _anchor(self):
+        """Where the celebration is centred: over the feedback line, never over the word.
+
+        The mockup stamped it at the card's middle, which on the real answer face lands exactly
+        on the word being celebrated — the live capture of `stress` (2026-11-04) showed the
+        pill covering the word and the 音标, reading as a glitch. The lower third already holds
+        回答正确, so the badge belongs there.
+        """
+        from PyQt6.QtCore import QPoint
+        return QPoint(self.width() // 2, int(self.height() * BADGE_TOP_FRACTION))
 
     def _phase(self, name, part=None):
         """0..1 through one step of the timeline, or 0 when it is not this step's turn."""
@@ -129,7 +140,7 @@ class Celebration(QWidget):
             return max(0.0, (raw - (1.0 - span)) / span) if raw >= 1.0 - span else 0.0
         return raw
 
-    def _paint_badge(self, painter, centre):
+    def _paint_badge(self, painter, anchor):
         raw = self._phase('badge')
         if raw <= 0:
             return
@@ -143,28 +154,37 @@ class Celebration(QWidget):
         label, caption = tier_label(self.tier), tier_caption(self.tier)
         painter.save()
         painter.setOpacity(opacity)
-        painter.translate(centre.x(), int(self.height() * 0.38))
+        painter.translate(anchor.x(), anchor.y())
         painter.rotate(angle)
         painter.scale(scale, scale)
         font = QFont(self.font())
         font.setPixelSize(BADGE_FONT_PX)
         font.setBold(True)
         painter.setFont(font)
-        width = max(180, painter.fontMetrics().horizontalAdvance(label) + 44)
+        width = max(190, painter.fontMetrics().horizontalAdvance(label) + 56)
         box = QRectF(-width / 2, -BADGE_HEIGHT / 2, width, BADGE_HEIGHT)
         path = QPainterPath()
         path.addRoundedRect(box, BADGE_HEIGHT / 2, BADGE_HEIGHT / 2)
         painter.fillPath(path, QColor(self.badge_color()))
-        painter.setPen(QColor('#ffffff'))
-        painter.drawRect(box.adjusted(0, 0, -1, -1))
+        # Stroke the rounded outline, not a rectangle around it: drawRect on a pill put square
+        # corners over the rounded fill, which is the first thing that looks broken in a
+        # screenshot.
+        border = QPen(QColor('#ffffff'))
+        border.setWidthF(2.5)
+        painter.setPen(border)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+        # The two lines are placed by metrics inside the pill. Drawing the caption at
+        # "box centre + height/2 - 4" put it on the border, where it read as clipped text.
         painter.setPen(QColor(self.badge_text()))
-        painter.drawText(box, int(Qt.AlignmentFlag.AlignCenter |
-                                  Qt.TextFlag.TextSingleLine), label)
+        painter.drawText(box.adjusted(0, -11, 0, 0),
+                         int(Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextSingleLine), label)
         small = QFont(font)
         small.setPixelSize(CAPTION_FONT_PX)
+        small.setBold(True)
         painter.setFont(small)
-        painter.drawText(box.adjusted(0, BADGE_HEIGHT / 2 - 4, 0, 0),
-                         int(Qt.AlignmentFlag.AlignCenter), caption)
+        painter.drawText(box.adjusted(0, 17, 0, 0),
+                         int(Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextSingleLine), caption)
         painter.restore()
 
     def badge_color(self):
@@ -174,48 +194,52 @@ class Celebration(QWidget):
     def badge_text(self):
         return '#20164a'
 
-    def _paint_sparks(self, painter, centre):
+    def _paint_sparks(self, painter, anchor):
         raw = self._phase('sparks')
         if raw <= 0:
             return
         step = TIMING['sparks']
         painter.save()
-        painter.setOpacity(max(0.0, 1.0 - raw))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor('#aab9ff' if self.dark else '#5668ca'))
-        reach = SPARK_REACH * raw
         for index in range(step['count']):
             angle = SPARK_ANGLES[index % len(SPARK_ANGLES)]
+            reach = SPARK_REACH * raw
+            size = SPARK_SIZE * (1.0 - raw * 0.55)
             painter.save()
-            painter.translate(centre.x(), int(self.height() * 0.38))
+            painter.setOpacity(max(0.0, 1.0 - raw))
+            painter.translate(anchor.x(), anchor.y())
             painter.rotate(angle)
             painter.translate(reach, 0)
-            size = 7.0 * (1.0 - raw * 0.4)
             star = QPainterPath()
             star.moveTo(0, -size)
-            star.lineTo(size * 0.35, 0)
+            star.lineTo(size * 0.32, 0)
             star.lineTo(0, size)
-            star.lineTo(-size * 0.35, 0)
+            star.lineTo(-size * 0.32, 0)
             star.closeSubpath()
+            painter.setBrush(QColor('#aab9ff' if self.dark else '#5668ca'))
             painter.drawPath(star)
             painter.restore()
         painter.restore()
 
-    def _paint_confetti(self, painter, centre):
+    def _paint_confetti(self, painter, anchor):
         raw = self._phase('confetti')
         if raw <= 0:
             return
         step = TIMING['confetti']
         colors = ('#ffd166', '#71e0b5', '#aab9ff', '#ff99a9', '#cdd9ff')
         painter.save()
-        painter.setOpacity(max(0.0, 1.0 - raw * raw))
         for index in range(step['count']):
+            local = (raw - index * CONFETTI_STAGGER) / max(0.05, 1.0 - index * CONFETTI_STAGGER)
+            if local <= 0:
+                continue
+            local = min(1.0, local)
             offset = CONFETTI_SLOTS[index % len(CONFETTI_SLOTS)]
-            x = centre.x() + offset
-            y = -20 + CONFETTI_FALL * _ease_out_back(min(1.0, raw))
+            x = anchor.x() + offset + 14 * math.sin(math.pi * local * 2 + index)
+            y = -24 + CONFETTI_FALL * local
             painter.save()
+            painter.setOpacity(max(0.0, 1.0 - local * local))
             painter.translate(x, y)
-            painter.rotate(raw * 540 + index * 20)
+            painter.rotate(local * 540 + index * 20)
             painter.setBrush(QColor(colors[index % len(colors)]))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRect(QRectF(-4.5, -7, 9, 14))
