@@ -13,6 +13,11 @@ from aqt.qt import (
     QPainter, QPushButton, QScrollArea, QStyle, QTimer, QUrl, QVBoxLayout, QWidget, pyqtSignal, Qt,
 )
 
+try:  # aqt.qt does not re-export every name on every Anki build (same pattern as card_icons)
+    from aqt.qt import QSizePolicy
+except ImportError:
+    from PyQt6.QtWidgets import QSizePolicy
+
 from .review_logic import (answer_matches, BOOK_LABEL_SOURCES, clean_detail, clean_text, cloze_sentence, collection_plan, EASE_NAMES, end_of_session_reason, example_groups, exam_word_labels, format_meaning, link_example_html, literature_example_html, masked_example, mask_answer_clues, meaning_table, next_check_delay, plan_limits_new, root_detail_html,
                            next_hint_index, prepare_question, hint_share, book_availability, book_label, book_progress, MASTERED_TAG, mark_mastered, meaning_markers, session_batch_size, should_style_card, spelling_hint, spoken_examples, submit_review, suggested_ease, suggests_mastering, today_remaining, updated_session_target, window_wait)
 from . import morphology, word_relations, speech, motion_view
@@ -328,6 +333,13 @@ class _ChoiceRow(QWidget):
         row = QHBoxLayout(self)
         row.setContentsMargins(12, 9, 12, 9)
         row.setSpacing(10)
+        # Fixed vertically: the default `Preferred` policy lets Qt hand the window's leftover
+        # height to the option boxes, which turned a two-option 判断题 into two 190 px blocks
+        # (the user's screenshot on 2026-11-04). An option is now exactly as tall as its own
+        # text, wrapped lines included, because sizeHint already accounts for them.
+        policy = self.sizePolicy()
+        policy.setVerticalPolicy(QSizePolicy.Policy.Fixed)
+        self.setSizePolicy(policy)
         # The boxes are stretched to share the answer area, so the letter and its meaning
         # have to sit in the middle of the box instead of clinging to its top edge.
         row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
@@ -637,7 +649,11 @@ class ReviewDialog(QDialog):
                 row.clicked.connect(lambda _checked=False, value=option: self.reveal(value == correct))
                 self.choice_buttons.append(row)
                 row.installEventFilter(self)
-                layout.addWidget(row, 1)
+                # No stretch: an option is exactly as tall as its own text. With `1` here the
+                # rows divided the window's leftover height between themselves, which measured
+                # 190 px per row for a two-option 判断题 in a 710 px window whose natural row
+                # height is 37 px — the screenshot the user sent on 2026-11-04.
+                layout.addWidget(row)
             self.installEventFilter(self)
         elif mode == 'speaking':
             self.spoken_answer_button = QPushButton('我已说出，查看答案')
@@ -885,19 +901,29 @@ class ReviewDialog(QDialog):
         return self.window() if getattr(self, '_embedded', False) else self
 
     def fit_card_height(self):
-        """Trim the dead band the answer leaves behind, and never touch the width.
+        """Trim the dead band the card leaves behind, and never touch the width.
 
         The window is sized for the question face, which is often taller than the answer:
         the leftover height then sits inside the details area and the foot of the card looks
         half-empty. Width is deliberately not recomputed here — a width change mid-flip is
         the jump that was already rejected, and the row is sized for it at birth.
+
+        An embedded card trims through its host window instead of refusing to: the handover
+        leaves the new card in the previous card's (often much taller) window, and §9.32's
+        rule is only that the card must not become shorter than the window it is drawn in.
+        Resizing the host keeps both in lockstep, because the host's own resizeEvent
+        re-fills the embedded card with the new rect.
         """
         hint = self.layout().sizeHint().height()
         if hint <= 0:
             return
         window = self.card_window()
         if window is not self:
-            # An embedded card does not own its height; the window it lives in does.
+            # An embedded card does not own its height; the window it lives in does. Trimming
+            # the host at handover would break the geometry stability that
+            # windows-next-card-transition.py pins (`old.geometry() == before`), which is the
+            # "换卡不许跳窗口" decision the user made earlier — so a card handed over into a
+            # tall window keeps that height and only its options stop stretching.
             return
         if window.height() - hint < 24:
             return
