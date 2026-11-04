@@ -3,6 +3,8 @@
 /.verification/
 /runtime-verification/
 /.update-feed/
+/deployment-backups/
+pg.out
 __pycache__/
 *.pyc
 *.log
