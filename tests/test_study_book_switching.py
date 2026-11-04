@@ -14,19 +14,22 @@ ROOT = Path(__file__).resolve().parents[1] / 'anki-global-addon' / 'zotero_globa
 path = ROOT / '__init__.py'
 tree = ast.parse(path.read_text(encoding='utf-8'))
 nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef)
-         and n.name in ('add_review_to_toolbar', 'choose_study_book')]
+         and n.name in ('add_review_to_toolbar', 'refresh_toolbar', 'choose_study_book')]
 spec = importlib.util.spec_from_file_location('book_logic_toolbar', ROOT / 'review_logic.py')
 logic = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(logic)
 
 
-def environment(config, saved, shown, feedback):
+def environment(config, saved, shown, feedback, drawn=None):
     review = types.SimpleNamespace(dialog=None, busy=False, show_next=lambda manual: shown.append(manual))
-    return {'mw': types.SimpleNamespace(col=object()),
+    drawn = drawn if drawn is not None else []
+    return {'mw': types.SimpleNamespace(col=object(),
+                                        toolbar=types.SimpleNamespace(draw=lambda: drawn.append(True))),
             'controller': types.SimpleNamespace(review=review),
             'settings': lambda: dict(config),
             'save_settings': lambda cfg: saved.append(dict(cfg)),
             'show_feedback': feedback,
+            'log_runtime': lambda *_a, **_k: None,
             'study_book': logic.study_book,
             'study_books': logic.study_books,
             'study_book_id': logic.study_book_id,
@@ -77,6 +80,15 @@ class Switching(unittest.TestCase):
         self.assertEqual([cfg['study_book'] for cfg in saved], ['cet4_core'])
         self.assertEqual(shown, [True])
         self.assertEqual(messages, [])
+
+    def test_switching_refreshes_the_toolbar_name_immediately(self):
+        # The old label survived until an Anki restart, so the button kept naming
+        # the previous book while the dashboard studied the new one.
+        saved, shown, messages, drawn = [], [], [], []
+        env = environment({'study_book': 'cet6_core'}, saved, shown, messages.append, drawn)
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), 'exec'), env)
+        env['choose_study_book']('cet4_core')
+        self.assertEqual(drawn, [True])
 
     def test_an_unknown_book_is_refused_without_touching_the_config(self):
         saved, shown, messages = self.run_switch({'study_book': 'cet6_core'}, 'does_not_exist')

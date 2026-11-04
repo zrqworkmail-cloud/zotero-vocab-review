@@ -22,6 +22,19 @@ class StudyDashboardTests(unittest.TestCase):
         self.assertIn('考试倒计时', with_deadline)
         self.assertIn('2 / 5', with_deadline)
 
+    def test_book_totals_make_the_tag_counter_impossible_to_confuse(self):
+        # Anki's browser counts every note type carrying the tag; the plan counts
+        # only the configured model and subtracts what has been studied.
+        today = datetime.date(2026, 10, 29)
+        plan = {'new': 12, 'new_goal': 40, 'new_done': 40, 'new_remaining': 0,
+                'review_goal': 5, 'review_done': 5, 'review_remaining': 0, 'due': 0, 'done': 45,
+                'book_total': 481, 'book_learned': 47, 'remaining_new_total': 434}
+        result = module.dashboard_html(today, '2026-12-12', plan, {}, auto_plan=True)
+        self.assertIn('当前词书共 481 张', result)
+        self.assertIn('已学 47', result)
+        self.assertIn('剩余新卡 434', result)
+        self.assertNotIn('485', result)
+
     def test_activity_counts_distinct_cards_per_local_day(self):
         today = datetime.date.today()
         now = int(datetime.datetime.combine(today, datetime.time(12)).timestamp() * 1000)

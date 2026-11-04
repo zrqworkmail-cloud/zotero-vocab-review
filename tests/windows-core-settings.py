@@ -3,7 +3,7 @@ base=r'D:\Program Files (x86)\Anki\app_packages';sys.path.insert(0,base)
 os.environ['PATH']=';'.join([os.path.join(base,'PyQt6','Qt6','bin'),os.path.dirname(base),os.path.join(os.environ['SystemRoot'],'System32'),os.environ['SystemRoot']])
 dlls=[os.add_dll_directory(os.path.join(base,'PyQt6','Qt6','bin')),os.add_dll_directory(os.path.dirname(base))];ctypes.WinDLL(os.path.join(os.environ['SystemRoot'],'System32','icuuc.dll'))
 os.environ['QT_QPA_PLATFORM']='offscreen';os.environ['QT_PLUGIN_PATH']=os.path.join(base,'PyQt6','Qt6','plugins')
-from PyQt6.QtWidgets import QApplication,QCheckBox,QComboBox,QDateEdit,QDialog,QDialogButtonBox,QFormLayout,QGroupBox,QHBoxLayout,QLabel,QLineEdit,QPushButton,QScrollArea,QSpinBox,QTimeEdit,QVBoxLayout,QWidget
+from PyQt6.QtWidgets import QApplication,QCheckBox,QComboBox,QDateEdit,QDialog,QDialogButtonBox,QFormLayout,QGroupBox,QHBoxLayout,QLabel,QLineEdit,QPushButton,QRadioButton,QScrollArea,QSpinBox,QTimeEdit,QVBoxLayout,QWidget
 from PyQt6.QtCore import QTimer,Qt,QDate,QTime,QObject,pyqtSignal,QEvent,QPoint,QPointF
 import threading
 from PyQt6.QtGui import QFont,QFontDatabase,QPalette,QColor,QWheelEvent
@@ -34,6 +34,7 @@ cfg.update(review_theme='light',review_hint_audio=False,review_plan_mode='fixed'
 import importlib.util
 source=os.path.abspath(os.path.join(os.path.dirname(__file__),'..','anki-global-addon','zotero_global_capture'))
 sp=importlib.util.spec_from_file_location('review_logic',os.path.join(source,'review_logic.py'));logic=importlib.util.module_from_spec(sp);sp.loader.exec_module(logic)
+sp2=importlib.util.spec_from_file_location('audio_volume',os.path.join(source,'audio_volume.py'));audio_volume=importlib.util.module_from_spec(sp2);sp2.loader.exec_module(audio_volume)
 review_decks=logic.review_decks
 selected_review_modes=logic.selected_review_modes
 collection_plan=logic.collection_plan
@@ -49,7 +50,9 @@ class ShortcutEdit(QLineEdit):
 path=os.path.join(source,'__init__.py')
 tree=ast.parse(open(path,encoding='utf-8').read());node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='open_settings');module=ast.Module(body=[node],type_ignores=[])
 scope=globals();scope.update(settings=lambda:dict(cfg),show_feedback=lambda *_a,**_k:None,format_shortcut=lambda *_:'Ctrl+Shift+F10',
-	BOOK_TAGS=logic.BOOK_TAGS,local_tags=local_tags,scope_decks=logic.scope_decks,scope_tags=logic.scope_tags,scope_uses_all_decks=logic.scope_uses_all_decks,
+	local_tags=local_tags,study_books=logic.study_books,study_book_id=logic.study_book_id,refresh_toolbar=lambda:None,
+	apply_sync_preference=lambda:None,
+	apply_review_volume=lambda value=None:None, volume_preview=lambda value:None,
 	dialog_now=dialog_now,check=check,failures=failures)
 exec(compile(module,path,'exec'),scope)
 
@@ -59,11 +62,11 @@ theme=types.ModuleType('aqt.theme');theme.theme_manager=types.SimpleNamespace(ni
 sys.modules['aqt']=aqt;sys.modules['aqt.theme']=theme
 
 
-def tag_boxes(d):
- return d.findChild(QWidget,'reviewScopeTags').findChildren(QCheckBox)
+def book_radios(d):
+ return d.findChild(QWidget,'studyBookList').findChildren(QRadioButton)
 
-def deck_boxes(d):
- return d.findChild(QWidget,'reviewExtraDeck').findChildren(QCheckBox)
+def book_ids(d):
+ return [x.property('bookId') for x in book_radios(d)]
 
 def save_button(d):
  return d.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save)
@@ -74,95 +77,113 @@ def open_and(act):
 saved=[]
 scope.update(save_settings=lambda data:saved.append(dict(data)),controller=types.SimpleNamespace(listener=types.SimpleNamespace(registered=True,registration_error=''),review=types.SimpleNamespace(dialog=object(),start=lambda:None)))
 
-# 1. The hardcoded book combo is gone, tags come from the collection, and a saved
-#    legacy book reappears as its tag already ticked rather than being dropped.
+# 1. The old deck+tag scope controls are gone. The list only offers books that really
+#    exist in this account, and a saved legacy book reopens as the same book checked.
 cfg.update(deck='四六级核心词汇',review_core_enabled=True,review_extra_decks=['四六级核心词汇','文献单词'],
 	review_book='cet6_kyle',review_scope_decks=[],review_scope_tags=[],review_tags_all=False,review_scope_name='')
 def inspect_first():
  d=dialog_now()
- check(d.findChild(QComboBox,'reviewBook') is None,'the hardcoded 复习词书 combo should be gone')
- check([x.property('tagName') for x in tag_boxes(d)]==sorted(LOCAL_TAGS),'tags must be read from the collection')
- checked=sorted(x.property('tagName') for x in tag_boxes(d) if x.isChecked())
- check(checked==['zvr_kyle_cet6'],'legacy book must map to its tag, got %s' % checked)
- core=next(x for x in deck_boxes(d) if x.property('deckName')=='四六级核心词汇')
- check(core.isChecked() and not core.isEnabled() and '主牌组' in core.text(),'main deck must stay selected and locked')
+ for name in ('reviewBook','reviewScopeTags','reviewExtraDeck','reviewTagsMatch','reviewAllDecks','reviewScopeName'):
+  check(d.findChild(QWidget,name) is None,'%s must be gone from the book model' % name)
+ check(book_ids(d)==['cet6_full','cet4_full','cet6_kyle','literature'],
+       'only books present in the account are offered, got %s' % book_ids(d))
+ checked=[x.property('bookId') for x in book_radios(d) if x.isChecked()]
+ check(checked==['cet6_kyle'],'the legacy 词书 must reopen as its book checked, got %s' % checked)
  save_button(d).click()
 open_and(inspect_first)
-check(bool(saved) and saved[-1]['review_core_enabled'],'save must keep the core-word preference')
-check(saved[-1]['review_book']=='' and saved[-1]['review_scope_tags']==['zvr_kyle_cet6'],'legacy book must migrate into scope tags')
-check(saved[-1]['review_scope_decks']==['四六级核心词汇','文献单词'],'scope decks must be written on save')
+check(saved[-1]['study_book']=='cet6_kyle','save must write the book id')
 
-# 2. Reopening restores the selection; a tag with a slash, the match mode and the
-#    display name all round-trip.
+# 2. Reopening restores the selection, and picking another book saves that one.
 cfg.update(saved[0]);saved.clear()
-def pick_tags():
+def pick_other():
  d=dialog_now()
- checked=sorted(x.property('tagName') for x in tag_boxes(d) if x.isChecked())
- check(checked==['zvr_kyle_cet6'],'reopen must restore saved tags, got %s' % checked)
- next(x for x in tag_boxes(d) if x.property('tagName')=='zvr_kyle_cet4').setChecked(True)
- next(x for x in tag_boxes(d) if x.property('tagName')=='工作/学习').setChecked(True)
- d.findChild(QLineEdit,'reviewScopeName').setText('四级 + 六级')
- d.findChild(QComboBox,'reviewTagsMatch').setCurrentIndex(1)
+ checked=[x.property('bookId') for x in book_radios(d) if x.isChecked()]
+ check(checked==['cet6_kyle'],'reopen must restore the saved book, got %s' % checked)
+ next(x for x in book_radios(d) if x.property('bookId')=='cet4_full').setChecked(True)
  save_button(d).click()
-open_and(pick_tags)
-check(sorted(saved[-1]['review_scope_tags'])==['zvr_kyle_cet4','zvr_kyle_cet6','工作/学习'],'tag selection must save, got %s' % saved[-1]['review_scope_tags'])
-check(saved[-1]['review_tags_all'] is True and saved[-1]['review_scope_name']=='四级 + 六级','match mode and name must round-trip')
+open_and(pick_other)
+check(saved[-1]['study_book']=='cet4_full','the picked book must save')
 
-# 3. A deck the saved config still names but which no longer exists must not clutter
-#    the picker — it matches nothing either way — and must not block saving.
-cfg.update(saved[-1]);cfg.update(review_extra_decks=['missing deck']);saved.clear()
-def stale_legacy():
+# 3. A saved book whose tag is not in this account must not be re-selected, and the
+#    dialog must refuse to save until a real book is picked.
+cfg.update(saved[-1]);cfg.update(study_book='cet6_core',review_book='');saved.clear()
+def missing_book():
  d=dialog_now()
- check('missing deck' not in [x.property('deckName') for x in deck_boxes(d)],'a deleted deck must not be listed')
- check(save_button(d).isEnabled(),'a deleted deck alone must not block saving')
+ check(not any(x.isChecked() for x in book_radios(d)),'a book with no cards must not be silently re-selected')
+ check(not save_button(d).isEnabled(),'saving without a book must be blocked')
+ check(any('请选择一本要学的词书' in x.text() for x in d.findChildren(QLabel)),'the reason must be on screen')
+ next(x for x in book_radios(d) if x.property('bookId')=='literature').setChecked(True)
+ check(save_button(d).isEnabled(),'picking a real book must unlock saving')
  save_button(d).click()
-open_and(stale_legacy)
-check(bool(saved) and saved[-1]['review_scope_name']=='四级 + 六级','saving must still work')
-check('missing deck' not in saved[-1]['review_scope_decks'],'saving must not resurrect a deleted deck')
+open_and(missing_book)
+check(saved[-1]['study_book']=='literature','saving after the fix must write the real book')
 
-# 4. Dropped decks are named in the help text, so the scope does not change quietly,
-#    and saving rewrites the scope without them.
-cfg.update(saved[-1]);cfg.update(review_scope_decks=['四六级核心词汇','已删除的牌组'],review_main_deck='已删除的牌组');saved.clear()
-def stale_scope():
+# 4. With no tags at all, tag books are not offered; the deck book still is, and a
+#    legacy tag book resolves to nothing rather than to a dangling selection.
+cfg.update(saved[-1]);cfg.update(study_book='',review_book='cet6_kyle');saved.clear()
+scope.update(local_tags=lambda: [])
+def no_tags():
  d=dialog_now()
- names=[x.property('deckName') for x in deck_boxes(d)]
- check('已删除的牌组' not in names,'a missing deck must not be listed, got %s' % names)
- help_text=d.findChild(QLabel,'scopeHelp').text()
- check('已删除的牌组' in help_text,'the help line should say which deck was dropped, got %r' % help_text)
- check(save_button(d).isEnabled(),'a deleted deck must not block saving')
+ check(book_ids(d)==['literature'],'only the deck book should remain, got %s' % book_ids(d))
+ check(not any(x.isChecked() for x in book_radios(d)),'an unavailable legacy book must not stay selected')
+ check(not save_button(d).isEnabled(),'nothing selected must block saving')
+ next(x for x in book_radios(d) if x.property('bookId')=='literature').setChecked(True)
  save_button(d).click()
-open_and(stale_scope)
-check(saved[-1]['review_scope_decks'] and '已删除的牌组' not in saved[-1]['review_scope_decks'],
-   'saving must rewrite the scope without the deleted deck, got %s' % saved[-1]['review_scope_decks'])
+open_and(no_tags)
+check(saved and saved[-1]['study_book']=='literature','the deck book must still be saveable')
 
-# 5. Even with no tags the deleted main deck must not come back.
-cfg.update(saved[-1]);cfg.update(review_scope_tags=[], review_tags_all=False)
-def no_tags_left():
+# 5. The window and sync controls are on the page with their defaults, because both
+#    change how Anki itself behaves and must not be buried in a config file.
+cfg.update(saved[-1]);cfg.pop('hide_main_on_close',None);cfg.pop('sync_background',None);saved.clear()
+def window_controls():
  d=dialog_now()
- check('已删除的牌组' not in [x.property('deckName') for x in deck_boxes(d)],'still absent without tags')
- check(d.findChild(QComboBox,'mainReviewDeck').currentData() in [x.property('deckName') for x in deck_boxes(d)],
-    'the main deck must be a deck that exists')
- d.reject()
-open_and(no_tags_left)
+ next(x for x in book_radios(d) if x.property('bookId')=='literature').setChecked(True)
+ hide=d.findChild(QWidget,'hideMainOnClose'); sync=d.findChild(QWidget,'syncBackground'); mins=d.findChild(QWidget,'syncBackgroundMinutes')
+ check(hide is not None and hide.isChecked(),'关闭主窗口 must default to 只隐藏')
+ check(sync is not None and sync.isChecked(),'后台同步 must be offered and on by default')
+ check(mins is not None and mins.value()==5,'同步间隔 must default to 5 分钟')
+ hide.setChecked(False); sync.setChecked(False)
+ save_button(d).click()
+open_and(window_controls)
+check(saved and saved[-1]['hide_main_on_close'] is False and saved[-1]['sync_background'] is False,saved[-1] if saved else None)
+check(saved and saved[-1]['sync_background_minutes']==5,saved[-1] if saved else None)
 
-# 6. A scope that was saved as "all decks, filtered by tag" must come back that way,
-#    with the now-meaningless deck list visibly disabled rather than silently applied.
-cfg.update(review_scope_decks=[], review_scope_tags=['zvr_kyle_cet4'], review_tags_all=False, review_scope_name='')
-def cross_deck():
-	 d=dialog_now()
-	 box=d.findChild(QCheckBox,'reviewAllDecks')
-	 check(box is not None and box.isChecked(),'an explicit cross-deck scope must reopen with 不限牌组 ticked')
-	 check(all(not x.isEnabled() for x in deck_boxes(d)),'deck choices are meaningless in cross-deck mode, so they must look disabled')
-	 box.setChecked(False)
-	 check(all(x.isEnabled() for x in deck_boxes(d) if '主牌组' not in x.text()),'unticking it must give the decks back')
-	 box.setChecked(True)
-	 save_button(d).click()
-open_and(cross_deck)
-check(saved[-1]['review_scope_decks']==[],'cross-deck mode must save an empty deck list')
-check(saved[-1]['review_scope_tags']==['zvr_kyle_cet4'],'cross-deck mode must keep its tag')
+# 6. 朗读音量: Anki has no volume control, so the plug-in carries the gain itself. The dial
+#    must be free (no invented cap), must apply while it is being moved, and must survive a
+#    missing key as the default rather than as a crash.
+applied=[]
+scope.update(apply_review_volume=lambda value=None: applied.append(value), volume_preview=lambda value: applied.append(('试听', value)))
+cfg.update(saved[-1]); cfg.pop('review_volume',None); saved.clear()
+def volume_default():
+ d=dialog_now()
+ next(x for x in book_radios(d) if x.property('bookId')=='literature').setChecked(True)
+ dial=d.findChild(QSpinBox,'reviewVolume')
+ check(dial is not None,'朗读音量 must be on the page')
+ check(dial.value()==180,'a saved profile without the key still gets the louder default, got %s' % dial.value())
+ check((dial.minimum(),dial.maximum())==(50,300),'the dial must not invent a cap smaller than the plug-in supports: %s' % ((dial.minimum(),dial.maximum()),))
+ check(dial.suffix()==' %','the number must read as a percentage, got %r' % dial.suffix())
+ dial.setValue(240)
+ check(applied and applied[-1]==240,'moving the dial must take effect at once, got %s' % applied)
+ save_button(d).click()
+open_and(volume_default)
+check(saved and saved[-1]['review_volume']==240,saved[-1] if saved else None)
+
+cfg.update(saved[-1]); saved.clear(); applied.clear()
+def volume_reopens():
+ d=dialog_now()
+ next(x for x in book_radios(d) if x.property('bookId')=='literature').setChecked(True)
+ dial=d.findChild(QSpinBox,'reviewVolume')
+ check(dial.value()==240,'the saved gain must reopen as itself, got %s' % dial.value())
+ hear=d.findChild(QWidget,'volumePreview')
+ check(hear is not None,'试听 must be next to the dial so the change can be heard')
+ hear.click()
+ check(applied==[('试听',240)],'试听 must speak at the dialled gain, got %s' % applied)
+ save_button(d).click()
+open_and(volume_reopens)
+check(saved and saved[-1]['review_volume']==240,saved[-1] if saved else None)
 
 if failures:
  print('FAIL')
  for f in failures: print('  -', f)
  sys.exit(1)
-print('Qt: study scope reads from the collection, migrates the legacy book, and reports a missing in-scope deck')
+print('Qt: the book list is single-select, reads the collection, migrates the legacy book, and never offers a missing one')

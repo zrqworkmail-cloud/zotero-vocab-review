@@ -110,6 +110,58 @@ class Decks(unittest.TestCase):
         self.assertGreater(len(calls), before, 'switching books must not reuse the old decks')
 
 
+class Progress(unittest.TestCase):
+    def test_progress_counts_the_book_and_how_many_were_answered(self):
+        seen = []
+        def api(action, params):
+            seen.append(params['query'])
+            return [1, 2] if params['query'].endswith(' prop:reps>0') else [1, 2, 3, 4]
+        self.assertEqual(logic.book_progress(api, dict(BASE, study_book='core')), (2, 4))
+        self.assertIn('tag:"zvr_cet6_core"', seen[0])
+        self.assertIn('note:"四六级单词模板"', seen[0])
+        self.assertTrue(seen[1].endswith(' prop:reps>0'), seen[1])
+        self.assertNotIn('prop:reps:', seen[1], 'Anki rejects the colon form as a parse error')
+
+    def test_no_book_is_zero_and_does_not_scan_the_collection(self):
+        calls = []
+        self.assertEqual(logic.book_progress(lambda *args, **kwargs: calls.append(args) or [1], dict(BASE)), (0, 0))
+        self.assertEqual(calls, [])
+
+
+class Availability(unittest.TestCase):
+    def test_each_deck_quota_caps_what_the_book_can_show(self):
+        # The real failure: a book with thousands of new cards offered nothing
+        # because both of its decks had already spent the day's new limit.
+        def api(action, params):
+            if action == 'deckNames':
+                return ['A', 'B']
+            if action == 'getDeckStats':
+                deck = params['decks'][0]
+                return {'1': {'name': deck, 'new_count': 0 if deck == 'A' else 7,
+                              'learn_count': 0, 'review_count': 0}}
+            query = params['query']
+            if query.endswith(' is:new'):
+                return list(range(100))
+            if query.endswith(' is:due'):
+                return []
+            return [1]
+        self.assertEqual(logic.book_availability(api, dict(BASE, study_book='core')), (7, 0))
+
+    def test_due_is_capped_by_the_decks_learn_and_review_quotas(self):
+        def api(action, params):
+            if action == 'deckNames':
+                return ['文献单词']
+            if action == 'getDeckStats':
+                return {'1': {'name': '文献单词', 'new_count': 5, 'learn_count': 2, 'review_count': 3}}
+            query = params['query']
+            if query.endswith(' is:new'):
+                return list(range(12))
+            if query.endswith(' is:due'):
+                return list(range(2))
+            return []
+        self.assertEqual(logic.book_availability(api, dict(BASE, study_book='lit')), (5, 2))
+
+
 class Questions(unittest.TestCase):
     def test_an_empty_book_says_so_instead_of_staying_silent(self):
         def api(action, params):

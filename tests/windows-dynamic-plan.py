@@ -29,10 +29,16 @@ for mode, target in [('daily',6),('fixed',4)]:
  ctl=DesktopReviewController(lambda:cfg,lambda *args:None,lambda *args:None,lambda *args:None);ctl.session_target=4;ctl.session_seen={1}
  dlg=types.SimpleNamespace(question={'card_id':2,'word':'test'});ctl.dialog=dlg;got=[]
  ctl.signals.saved.disconnect(ctl._saved);ctl.signals.graded.disconnect(ctl._graded);ctl.signals.graded.connect(lambda d,e,g,n:got.append((e,n)))
- rp.submit_review=lambda *a,**k:None;rp.collection_plan=lambda *a,**k:{'batch':6};rp.prepare_question=lambda *a,**k:{'card_id':3}
+ # A plan the real next-card path can consume: batch drives the target, new_remaining
+ # the due-only gate, and goal/done the today counter the card prints.
+ rp.submit_review=lambda *a,**k:None;rp.collection_plan=lambda *a,**k:{'batch':6,'new_remaining':1,'goal':10,'done':4};rp.prepare_question=lambda *a,**k:{'card_id':3}
+ rp.book_progress=lambda *a,**k:(47,481)
  ctl._grade(dlg,3)
  for _ in range(100):
   app.processEvents();QTest.qWait(5)
   if got:break
  assert got and got[0][0] is None and got[0][1][2]==target,got
-print('Qt: post-rating recalculates automatic target; fixed plan retains target')
+ # The eyebrow's 已学/总数 has to be stamped on the in-session path as well, or only
+ # the first card of a session would show progress.
+ assert got[0][1][0]['_book_progress']==(47,481),got[0][1][0]
+print('Qt: post-rating recalculates automatic target, keeps the target in fixed mode, and stamps book progress on the next card')

@@ -1,6 +1,7 @@
 import importlib.util
 import datetime
 import random
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -61,6 +62,11 @@ CFG = {'deck': 'Literature', 'model': 'Words', 'front_field': 'Front', 'back_fie
        'study_book': 'literature',
        'study_books': [{'id': 'literature', 'name': '文献单词', 'deck': 'Literature'},
                        {'id': 'cet', 'name': 'CET 标签范围', 'tag': 'zvr_cet6_core'}]}
+
+
+def deck_stats(name, new=999, learn=0, review=999):
+    """One getDeckStats answer, keyed by deck id the way Anki returns it."""
+    return {'1': {'name': name, 'new_count': new, 'learn_count': learn, 'review_count': review}}
 
 
 class ReviewLogicTests(unittest.TestCase):
@@ -138,8 +144,19 @@ class ReviewLogicTests(unittest.TestCase):
         labels = logic.exam_word_labels('increases')
         self.assertIn('四级词表', labels)
         self.assertIn('六级词表', labels)
-        self.assertIn('六级社区核心词', labels)
+        self.assertIn('六级核心', labels)
         self.assertEqual(logic.exam_word_labels('zzzxxyyqq'), [])
+
+    def test_every_chip_label_names_its_own_source(self):
+        # The card prints one pill per list, so provenance is per pill rather than one
+        # joined sentence: 四级/六级词表 come from ECDICT, 六级核心 from the community list.
+        self.assertEqual(logic.exam_word_sources(['四级词表', '六级词表', '六级核心']),
+                         ['ECDICT 四六级词表', 'CET-6 Top 500 社区整理'])
+        self.assertEqual(logic.exam_word_sources(['六级核心']), ['CET-6 Top 500 社区整理'])
+        self.assertEqual(logic.exam_word_sources([]), [])
+        self.assertEqual(logic.exam_word_sources(['没有这个表']), [])
+        for label in logic.exam_word_labels('increases'):
+            self.assertIn(label, logic.BOOK_LABEL_SOURCES)
 
     def test_cet_core_prefers_core_within_due_cards(self):
         api = FakeAnki()
@@ -243,7 +260,21 @@ class ReviewLogicTests(unittest.TestCase):
         reached = logic.study_plan(today, '2026-11-02', 100, 4, 10, 10, 1, 30)
         self.assertEqual(reached['new_remaining'], 0)
         overloaded = logic.study_plan(today, '', 100, 0, 100, 0, 1, 30)
-        self.assertEqual((overloaded['batch'], overloaded['capacity_shortfall']), (10, 80))
+        # A group is no longer capped at ten: two study windows split a hundred-card day in
+        # two, and the shortfall is measured against what Anki will actually serve today.
+        self.assertEqual(overloaded['batch'], 50)
+        self.assertEqual(overloaded['capacity_shortfall'], 0)
+        capped = logic.study_plan(today, '', 100, 0, 100, 0, 1, 30, available=(40, 4))
+        self.assertEqual(capped['capacity_shortfall'], 56)
+
+    def test_a_group_is_as_big_as_the_user_says(self):
+        # The 10-card ceiling used to turn a 104-card day into eleven separate clicks and
+        # capped the fixed setting in the dialog; nothing raises or limits it now.
+        self.assertEqual(logic.session_batch_size(dict(CFG, review_plan_mode='fixed', review_batch_size=200)), 200)
+        self.assertEqual(logic.session_batch_size(dict(CFG, review_plan_mode='fixed', review_batch_size=3),
+                                                   {'batch': 7}), 3)
+        self.assertEqual(logic.session_batch_size(dict(CFG, review_plan_mode='daily'), {'batch': 104}), 104)
+        self.assertEqual(logic.updated_session_target(3, {'batch': 104}), 104)
 
     def test_beautify_applies_to_selected_decks_and_children(self):
         cfg = dict(CFG, study_book='cet', _book_decks=['Literature', 'CET'], _book_decks_key='cet')
@@ -256,6 +287,8 @@ class ReviewLogicTests(unittest.TestCase):
         def api(action, params):
             if action == 'deckNames':
                 return ['CET']
+            if action == 'getDeckStats':
+                return deck_stats(params['decks'][0])
             queries.append(params['query'])
             if 'is:new' in params['query'] and '-is:new' not in params['query']:
                 return list(range(100))
@@ -337,6 +370,8 @@ class ReviewLogicTests(unittest.TestCase):
 
     def test_collection_plan_deduplicates_overlapping_decks(self):
         def api(action, params):
+            if action == 'getDeckStats':
+                return deck_stats(params['decks'][0])
             self.assertEqual(action, 'findCards')
             query = params['query']
             if 'is:new' in query and '-is:new' not in query:
@@ -348,7 +383,9 @@ class ReviewLogicTests(unittest.TestCase):
         self.assertEqual((plan['due'], plan['done'], plan['goal']), (2, 1, 10))
 
     def test_collection_plan_separates_new_and_review_progress(self):
-        def api(_action, params):
+        def api(action, params):
+            if action == 'getDeckStats':
+                return deck_stats(params['decks'][0])
             query = params['query']
             if 'introduced:1' in query: return [1, 2]
             if 'rated:1' in query: return [1, 2, 3, 4]
@@ -362,11 +399,42 @@ class ReviewLogicTests(unittest.TestCase):
         self.assertEqual(plan['review_goal'], 4)
         self.assertEqual(plan['new_goal'], plan['new_done'] + plan['new_remaining'])
 
+    def test_a_caller_without_deck_stats_still_gets_a_plan(self):
+        # The in-process dashboard speaks findCards only; the plan must degrade to "no claim
+        # about today's ceiling" instead of raising KeyError and blanking the dashboard.
+        def api(action, params):
+            if action == 'deckNames':
+                return ['Literature']
+            if 'is:new' in params['query']:
+                return [1, 2, 3]
+            return []
+        plan = logic.collection_plan(api, dict(CFG, review_daily_goal=50))
+        self.assertNotIn('available_new', plan)
+        self.assertEqual(plan['capacity_shortfall'], 0)
+        self.assertEqual(plan['new_remaining'], 3)
+
     def test_hints_follow_last_correct_letter_and_skip_existing_hints(self):
         self.assertEqual(logic.next_hint_index('apple', ['a', 'p', '', '', ''], set()), 2)
         self.assertEqual(logic.next_hint_index('apple', ['a', 'x', 'p', '', ''], {3}), 4)
         self.assertEqual(logic.next_hint_index('cat', ['c', 'x', 't'], set()), 1)
         self.assertIsNone(logic.next_hint_index('cat', ['c', 'a', 't'], set()))
+
+    def test_a_cloze_always_asks_the_base_form(self):
+        # A sentence that uses an inflected form must still ask for the headword: the blank
+        # is as long as the word to type, not as long as the word the sentence happened to use.
+        self.assertEqual(logic.cloze_sentence('They follow a set patterns.', 'pattern'),
+                         'They follow a set _______.')
+        self.assertEqual(logic.cloze_sentence('She ran yesterday.', 'run'), 'She ___ yesterday.')
+        self.assertEqual(logic.cloze_form('They follow a set patterns.', 'pattern'), 'patterns')
+
+    def test_a_cloze_question_carries_the_base_form_and_shows_the_sentence_form(self):
+        api = FakeAnki()
+        api.cards[1]['fields']['例句'] = {'value': 'These notions are useful.'}
+        question = logic.prepare_question(api, CFG, 'cloze', random.Random(2))
+        self.assertEqual(question['mode'], 'cloze')
+        self.assertEqual(question['answer_form'], 'notion', 'the user types the headword, not the plural')
+        self.assertEqual(question['cloze_shown'], 'notions', 'the answer face still says what the sentence used')
+        self.assertEqual(question['cloze'], 'These ______ are useful.')
 
     def test_cloze_uses_attested_inflection_and_preserves_word_boundaries(self):
         self.assertEqual(logic.cloze_form('She ran yesterday.', 'run'), 'ran')
@@ -389,6 +457,15 @@ class ReviewLogicTests(unittest.TestCase):
         self.assertIn('逃跑 &amp; 躲避', result)
         self.assertNotIn('n.  猫', result)
 
+    def test_the_meaning_columns_line_up_on_every_row(self):
+        # Part of speech right-aligned against a fixed gap cell, meaning left-aligned: the
+        # distance between the two columns is the same for `n.` and for `n & v.`.
+        rendered = logic.meaning_table('n.猫vi.逃跑 & 躲避', 46, 20, 8)
+        self.assertIn('<td width="46" align="right" valign="top">n.</td>', rendered)
+        self.assertIn('<td width="46" align="right" valign="top">vi.</td>', rendered)
+        self.assertIn('<td width="8"></td>', rendered)
+        self.assertIn('colspan="3"', logic.meaning_table('没有词性的整行', 46, 0, 8))
+
     def test_examples_are_grouped_with_translation_and_source(self):
         text = 'First example.\n第一条。\nSecond example.\n第二条。\n\n“Study sentence.” —— Paper'
         self.assertEqual(logic.example_groups(text), ['First example.\n第一条。', 'Second example.\n第二条。', '“Study sentence.” —— Paper'])
@@ -409,7 +486,10 @@ class ReviewLogicTests(unittest.TestCase):
         self.assertEqual(logic.example_groups(text), [text])
 
     def test_recall_scoring_uses_native_grades_for_severity(self):
-        self.assertEqual(logic.suggested_ease(True, 0, 0), 3)
+        # A clean recall is the one case the user wants to be able to fire with Enter:
+        # the suggestion has to reach Easy, otherwise a word they already know is
+        # recorded as Good and keeps coming back.
+        self.assertEqual(logic.suggested_ease(True, 0, 0), 4)
         self.assertEqual(logic.suggested_ease(True, 0, 1), 3)
         self.assertEqual(logic.suggested_ease(True, 0, 2), 2)
         self.assertEqual(logic.suggested_ease(True, 0, 3), 2)
@@ -420,6 +500,70 @@ class ReviewLogicTests(unittest.TestCase):
         self.assertEqual(logic.suggested_ease(True, 0, 4), 1)
         self.assertEqual(logic.suggested_ease(True, 0, 0, 2), 1)
         self.assertEqual(logic.suggested_ease(False, 0, 0), 1)
+
+    def test_the_same_slip_is_worth_more_on_a_harder_question(self):
+        # Spelling the word is the hardest class, so three wrong letters plus a hint there
+        # is treated as a miss, while the same record on a four-option question is only
+        # Hard. The raw ladder is unchanged when no mode is given.
+        self.assertEqual(logic.suggested_ease(True, 1, 3, 0, 'typing'), 1)
+        self.assertEqual(logic.suggested_ease(True, 1, 3, 0, 'choice'), 2)
+        self.assertEqual(logic.suggested_ease(True, 0, 2, 0, 'choice'), 2)
+        self.assertEqual(logic.suggested_ease(True, 0, 0, 0, 'typing'), 4)
+        self.assertEqual(logic.suggested_ease(True, 0, 0), logic.suggested_ease(True, 0, 0, 0, None))
+
+    def test_what_counts_as_already_known_differs_by_question_type(self):
+        # Spelling the base form is its own proof, so no clock is needed. Picking the right
+        # meaning only counts when it was instant. Judgment is left out: two options make a
+        # fast right answer a coin flip.
+        self.assertTrue(logic.suggests_mastering('typing', True, seconds=99))
+        self.assertTrue(logic.suggests_mastering('choice', True, seconds=1.2))
+        self.assertTrue(logic.suggests_mastering('listening', True, seconds=logic.MASTERED_WINDOW_SECONDS))
+        self.assertFalse(logic.suggests_mastering('choice', True, seconds=3.1))
+        self.assertFalse(logic.suggests_mastering('cloze', True, seconds=None))
+        self.assertFalse(logic.suggests_mastering('judgment', True, seconds=0.1))
+        self.assertFalse(logic.suggests_mastering('typing', False, seconds=0.5))
+        self.assertFalse(logic.suggests_mastering('typing', True, hints=1))
+        self.assertFalse(logic.suggests_mastering('typing', True, incorrect_letters=1))
+        self.assertFalse(logic.suggests_mastering('typing', True, failed_checks=1))
+        self.assertFalse(logic.suggests_mastering('unknown-mode', True, seconds=0.1))
+
+    def test_mastering_suspends_the_card_and_tags_the_note(self):
+        # "I already know this" has to leave the study range without writing a rating.
+        # Suspend is the reversible lever every card query already honours; the tag is
+        # what makes the decision findable and undoable in bulk later.
+        calls = []
+        def api(action, params):
+            calls.append((action, params))
+            return [{'cardId': 99, 'note': 7}] if action == 'cardsInfo' else True
+        self.assertEqual(logic.mark_mastered(api, CFG, {'card_id': 99, 'word': 'yield'}), 7)
+        self.assertIn(('suspend', {'cards': [99]}), calls)
+        self.assertIn(('addTags', {'notes': [7], 'tags': 'zvr_mastered'}), calls)
+        self.assertEqual([c for c in calls if c[0] == 'answerCards'], [], 'mastering must not write a rating')
+
+    def test_mastering_without_a_note_still_suspends_the_card(self):
+        calls = []
+        def api(action, params):
+            calls.append((action, params))
+            return [] if action == 'cardsInfo' else True
+        self.assertIsNone(logic.mark_mastered(api, CFG, {'card_id': 99}))
+        self.assertEqual([c[0] for c in calls], ['cardsInfo', 'suspend'])
+
+    def test_compound_part_of_speech_stays_on_one_line(self):
+        # 'vt&amp;vi. 出产' arrived as one marker; splitting it after the '&' left a
+        # dangling 'vt&' line in the card.
+        lines = logic.format_meaning('v.屈服，产出 n.产量 vt&vi.出产').splitlines()
+        self.assertEqual(len(lines), 3, lines)
+        self.assertTrue(lines[2].startswith('vt&vi.'), lines[2])
+        self.assertEqual(len(logic.format_meaning('n./v.生产').splitlines()), 1)
+        self.assertEqual(logic.meaning_markers('v.屈服 vt&vi.出产'), ['v.', 'vt&vi.'])
+        rendered = logic.meaning_table('vt&vi.出产')
+        self.assertIn('valign="top">vt&amp;vi.</td>', rendered, rendered)
+
+    def test_meaning_block_is_indented_under_its_heading(self):
+        rendered = logic.meaning_table('n.猫', 24, 20)
+        self.assertIn('<td width="20"></td>', rendered, rendered)
+        self.assertIn('width="24" align="right" valign="top">n.</td>', rendered, rendered)
+        self.assertNotIn('<td width="20"></td>', logic.meaning_table('n.猫', 24))
 
     def test_native_hard_rating_is_sent_to_anki(self):
         api = FakeAnki()
@@ -571,6 +715,18 @@ class ReviewLogicTests(unittest.TestCase):
         api.stats['review_count'] = 1
         self.assertEqual(logic.prepare_question(api, CFG, 'typing', random.Random(2), due_only=True)['kind'], 'due')
 
+    def test_a_rating_in_flight_already_consumes_its_deck_slot(self):
+        # The card being written in the background has taken one of the deck's new
+        # slots for today. Offering another would show a card Anki then refuses to
+        # grade, so the in-flight rating has to be subtracted from the quota.
+        api = FakeAnki()
+        api.stats.update(new_count=1, learn_count=0, review_count=0)
+        self.assertEqual(logic.prepare_question(api, CFG, 'typing', random.Random(1))['kind'], 'new')
+        self.assertIsNone(logic.prepare_question(api, dict(CFG, _review_inflight_new=1), 'typing', random.Random(1)))
+        api.stats.update(new_count=0, review_count=1)
+        self.assertEqual(logic.prepare_question(api, CFG, 'typing', random.Random(1))['kind'], 'due')
+        self.assertIsNone(logic.prepare_question(api, dict(CFG, _review_inflight_due=1), 'typing', random.Random(1)))
+
     def test_smart_check_preserves_regular_deadline(self):
         self.assertEqual(logic.next_check_delay(100, 1300, True), 300)
         self.assertEqual(logic.next_check_delay(1200, 1300, True), 100)
@@ -630,6 +786,90 @@ class ReviewLogicTests(unittest.TestCase):
         self.assertFalse(logic.should_style_card('Literature', 'Other', 'reviewQuestion', CFG))
         self.assertFalse(logic.should_style_card('Literature', 'Words', 'previewQuestion', CFG))
         self.assertFalse(logic.should_style_card('Literature', 'Words', 'reviewQuestion', dict(CFG, review_beautify=False)))
+
+
+class QuitRequest(unittest.TestCase):
+    """The restart tool's only way to ask for a real exit while a tray add-on is installed."""
+
+    def test_a_request_is_answered_once_and_consumed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = logic.quit_request_path(tmp)
+            self.assertFalse(logic.take_quit_request(path), 'nothing waiting is not a request')
+            path.write_text('2026-11-04T10:36:52', encoding='utf-8')
+            self.assertTrue(logic.take_quit_request(path))
+            self.assertFalse(path.exists(), 'a stale note would quit the next session too')
+            self.assertFalse(logic.take_quit_request(path))
+
+    def test_an_unreachable_directory_is_answered_with_nothing(self):
+        self.assertFalse(logic.take_quit_request(logic.quit_request_path(
+            str(logic.Path(tempfile.gettempdir()) / 'zvr-no-such-directory-91827'))))
+
+
+class TrayClosePolicy(unittest.TestCase):
+    def test_a_tray_add_on_means_the_close_button_is_not_a_shutdown(self):
+        # 'Minimize to Tray 2' keeps Anki alive, so X is "go to background" and the study
+        # timers must keep running; only our own 退出 Anki (forcing) is a real exit.
+        self.assertTrue(logic.background_instead_of_quit(True, False))
+        self.assertFalse(logic.background_instead_of_quit(True, True))
+        self.assertFalse(logic.background_instead_of_quit(False, False))
+        self.assertFalse(logic.background_instead_of_quit(False, True))
+
+
+class SpellingHintGrading(unittest.TestCase):
+    """看中文写单词：提示的**种类**和**位置**决定建议评分（2026-11-04 用户口径）。
+
+    旧规则是"按过任何一次提示就一律 Hard"，用户否掉了：一次发音提示几乎等于没提示，
+    而空格提示出来的字母要按位置加权——首字母值钱，末尾字母不值钱。
+    """
+
+    def test_early_letters_are_worth_more_than_late_ones(self):
+        # 权重 1/(i+1)，所以占比是全词权重和的归一化结果。
+        self.assertEqual(logic.hint_share(set(), 14), 0.0)
+        self.assertAlmostEqual(logic.hint_share({0}, 14), 0.30754, places=4)
+        self.assertAlmostEqual(logic.hint_share({13}, 14), 0.02195, places=4)
+        self.assertAlmostEqual(logic.hint_share({0, 1, 2, 3, 4}, 5), 1.0, places=6)
+        self.assertEqual(logic.hint_share({99}, 5), 0.0)          # 越界索引不计
+        self.assertEqual(logic.hint_share({0}, 0), 0.0)           # 没有字母就没有比例
+
+    def test_one_audio_hint_is_still_easy(self):
+        self.assertEqual(logic.suggested_ease(True, 1, 0, 0, 'typing', audio_hints=1), 4)
+        self.assertEqual(logic.suggested_ease(True, 2, 0, 0, 'typing', audio_hints=2), 3)
+        self.assertEqual(logic.suggested_ease(True, 3, 0, 0, 'typing', audio_hints=3), 2)
+        self.assertEqual(logic.suggested_ease(True, 5, 0, 0, 'typing', audio_hints=5), 2)
+
+    def test_letter_hints_are_banded_by_position_weighted_share(self):
+        # characteristic 首字母 31% → Good；drive 首字母 44% → Hard；advantage 末字母 4% → Easy
+        self.assertEqual(logic.suggested_ease(True, 1, 0, 0, 'typing', revealed={0}, letters=14), 3)
+        self.assertEqual(logic.suggested_ease(True, 1, 0, 0, 'typing', revealed={0}, letters=5), 2)
+        self.assertEqual(logic.suggested_ease(True, 1, 0, 0, 'typing', revealed={8}, letters=9), 4)
+        self.assertEqual(logic.suggested_ease(True, 4, 0, 0, 'typing', revealed={0, 1, 2}, letters=5), 1)
+
+    def test_the_strictest_component_wins(self):
+        # 一次发音（Easy）+ 首字母（Good）+ 一个错字母（Good）→ Good
+        self.assertEqual(logic.suggested_ease(True, 2, 1, 0, 'typing',
+                                              audio_hints=1, revealed={0}, letters=14), 3)
+        # 两个错字母把地板压到 Hard
+        self.assertEqual(logic.suggested_ease(True, 2, 2, 0, 'typing',
+                                              audio_hints=1, revealed={0}, letters=14), 2)
+        # 检查失败一次就是 Hard，发音提示再轻也救不回来
+        self.assertEqual(logic.suggested_ease(True, 1, 0, 1, 'typing', audio_hints=1), 2)
+        # 答错永远是 Again
+        self.assertEqual(logic.suggested_ease(False, 1, 0, 0, 'typing', audio_hints=1), 1)
+
+    def test_meaning_and_example_hints_keep_the_hard_floor(self):
+        self.assertEqual(logic.suggested_ease(True, 1, 0, 0, 'typing', other_hints=1), 2)
+        self.assertEqual(logic.suggested_ease(True, 2, 0, 0, 'typing',
+                                              audio_hints=1, other_hints=1), 2)
+
+    def test_a_caller_without_components_still_gets_the_blanket_rule(self):
+        # 其它题型（选择/填空/听力）暂时只报"提示次数"，语义必须保持原样。
+        self.assertEqual(logic.suggested_ease(True, 1, 0), 2)
+        self.assertEqual(logic.suggested_ease(True, 0, 0, 0, 'typing'), 4)
+        self.assertEqual(logic.suggested_ease(True, 1, 3, 0, 'typing'), 1)
+
+    def test_any_hint_at_all_stops_being_mastered(self):
+        self.assertTrue(logic.suggests_mastering('typing', True, hints=0))
+        self.assertFalse(logic.suggests_mastering('typing', True, hints=1))
 
 
 if __name__ == '__main__':

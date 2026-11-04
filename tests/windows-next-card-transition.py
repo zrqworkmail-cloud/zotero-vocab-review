@@ -56,6 +56,15 @@ for theme in ('light','dark'):
   assert ctl.dialog is not second_dialog and ctl.dialog.window() is old and old.isVisible()
   assert old.geometry()==before and ctl.session_seen=={1,2}
   current=ctl.dialog; old.resize(old.width()+10,old.height()+10);app.processEvents();assert current.geometry()==old.rect()
-  ratings=[];current.grade=lambda _d,ease:ratings.append(ease);current.reveal(True);app.processEvents();QTest.keyClick(current,Qt.Key.Key_Return);assert ratings==[3],ratings
-  ctl.dialog.close();app.processEvents();assert not old.isVisible() and ctl.dialog is None
+  ratings=[];mastered=[];current.grade=lambda _d,ease:ratings.append(ease)
+  current.mastered.connect(lambda card: mastered.append(card.question['card_id']))
+  current.reveal(True);app.processEvents()
+  # Enter does what the card recommended. A flawless spelling recommends Mastered, not a
+  # rating, so the row must not record one. (A/B/C/D still rate the card; that is pinned in
+  # windows-grading-letters.py.)
+  QTest.keyClick(current,Qt.Key.Key_Return);app.processEvents();QTest.qWait(60)
+  assert mastered==[current.question['card_id']] and ratings==[],(mastered,ratings)
+  if ctl.dialog is not None:
+    ctl.dialog.close()
+  app.processEvents();assert not old.isVisible() and ctl.dialog is None
 print('Qt: next card overlaps old window and keeps geometry, focus, and session state')

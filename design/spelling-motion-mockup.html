@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>拼写题动效样稿 · 字母跳跃 + 分级庆祝</title>
+</head>
+<body style="margin:0;background:#0a0e18;padding:24px">
+<div class="spellfx">
+<style>
+  :root{
+    --bg:#171c2b; --panel:#252e40; --line:#46556d; --ink:#edf1fa; --dim:#9fb0d4;
+    --accent:#aab9ff; --good:#71e0b5; --bad:#ff99a9;
+  }
+  .spellfx *,.spellfx *::before,.spellfx *::after{box-sizing:border-box}
+  .spellfx{background:#0e1220;color:var(--ink);font-family:"Segoe UI","Microsoft YaHei",sans-serif;padding:22px;border-radius:14px}
+  h1{font-size:17px;margin:0 0 4px}
+  .sub{color:var(--dim);font-size:12.5px;margin-bottom:18px}
+  .wrap{display:flex;gap:22px;flex-wrap:wrap;align-items:flex-start}
+  .stage{width:510px}
+  /* the card, matched to the real dark theme */
+  .card{position:relative;background:var(--bg);border:1px solid #2a3350;border-radius:16px;padding:20px 24px;overflow:hidden}
+  .eyebrow{font-size:11px;letter-spacing:1px;color:var(--accent);font-weight:700}
+  .row{display:flex;gap:7px;justify-content:center;margin:26px 0 8px}
+  .box{width:38px;height:40px;border-radius:8px;background:#fff;border:1px solid #dce4f1;color:#172554;
+       font-size:18px;font-weight:700;display:flex;align-items:center;justify-content:center;
+       transform-origin:50% 100%}
+  .box.empty{background:var(--panel);border-color:var(--line);color:#5d6c8c}
+  .box.bad{background:#fff;color:var(--bad);border-color:#f2c3cc}
+  .word{font-size:27px;font-weight:750;text-align:center;letter-spacing:-.02em;margin-top:6px;transform-origin:50% 60%}
+  .phon{color:var(--dim);font-size:13px;text-align:center;margin-top:2px}
+  .hint{color:var(--dim);font-size:12px;margin-top:16px}
+  /* celebration layer */
+  .fx{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+  .badge{position:absolute;left:50%;top:38%;transform:translate(-50%,-50%) scale(.2) rotate(-8deg);opacity:0;
+         padding:10px 22px;border-radius:999px;border:3px solid #fff;box-shadow:0 12px 30px rgba(0,0,0,.45);
+         font-size:26px;font-weight:900;letter-spacing:.5px;white-space:nowrap;color:#20164a}
+  .badge.t1{background:linear-gradient(100deg,#ffd166,#ff70a6,#7cf5ff)}
+  .badge.t2{background:linear-gradient(100deg,#ffe58a,#ffd166,#ffb703)}
+  .badge.t3{background:linear-gradient(100deg,#a7f3d0,#71e0b5,#5ec8f0)}
+  .badge.t4{background:linear-gradient(100deg,#cdd9ff,#aab9ff)}
+  .badge small{display:block;font-size:11px;font-weight:700;letter-spacing:2px;opacity:.75;text-align:center}
+  .spark{position:absolute;left:50%;top:38%;width:14px;height:14px;opacity:0}
+  .conf{position:absolute;width:9px;height:14px;border-radius:3px;opacity:0;top:-20px}
+  @keyframes pop{0%{transform:translateY(0) scale(1,1)}30%{transform:translateY(-11px) scale(.9,1.12)}
+                 60%{transform:translateY(0) scale(1.1,.86)}100%{transform:translateY(0) scale(1,1)}}
+  @keyframes nope{0%,100%{transform:translateX(0)}20%{transform:translateX(-5px)}40%{transform:translateX(5px)}
+                  60%{transform:translateX(-3px)}80%{transform:translateX(3px)}}
+  @keyframes bounceword{0%{transform:scale(1)}35%{transform:scale(1.34) translateY(-9px)}
+                        62%{transform:scale(.96) translateY(0)}80%{transform:scale(1.05)}100%{transform:scale(1)}}
+  @keyframes shake{0%,100%{transform:translate(0,0)}25%{transform:translate(-2px,1px)}
+                   50%{transform:translate(2px,-1px)}75%{transform:translate(-1px,1px)}}
+  @keyframes badgein{0%{transform:translate(-50%,-50%) scale(.2) rotate(-8deg);opacity:0}
+                     55%{transform:translate(-50%,-50%) scale(1.14) rotate(2deg);opacity:1}
+                     75%{transform:translate(-50%,-50%) scale(.97) rotate(0)}
+                     100%{transform:translate(-50%,-50%) scale(1) rotate(0);opacity:1}}
+  @keyframes badgeout{to{transform:translate(-50%,-64%) scale(.86);opacity:0}}
+  @keyframes sparkfly{0%{transform:translate(-50%,-50%) scale(.2);opacity:1}
+                      100%{transform:translate(calc(-50% + var(--dx)),calc(-50% + var(--dy))) scale(1);opacity:0}}
+  @keyframes conffall{0%{transform:translateY(0) rotate(0);opacity:1}
+                      100%{transform:translateY(300px) rotate(540deg);opacity:0}}
+  .playing .card{animation:shake .12s 1}
+  .controls{width:330px;background:#141a2b;border:1px solid #26304a;border-radius:14px;padding:16px}
+  .controls h2{font-size:13px;margin:0 0 10px;color:var(--accent);letter-spacing:1px}
+  button{font:inherit;font-size:13px;padding:8px 12px;border-radius:9px;border:1px solid var(--line);
+         background:var(--panel);color:var(--ink);cursor:pointer;margin:0 6px 8px 0}
+  button:hover{border-color:var(--accent)}
+  button.on{background:var(--accent);color:#141a2b;border-color:var(--accent);font-weight:700}
+  table{width:100%;border-collapse:collapse;font-size:11.5px;margin-top:8px}
+  td{padding:4px 6px;border-bottom:1px solid #222b41;color:#c3cee6;vertical-align:top}
+  td:first-child{color:var(--ink);white-space:nowrap}
+  .note{font-size:11.5px;color:var(--dim);line-height:1.7;margin-top:10px}
+  .tiername{font-weight:800;color:var(--ink)}
+</style>
+
+<h1>拼写题动效样稿 · 字母跳跃 + 分级庆祝</h1>
+<div class="sub">按你的要求：先给样片和样稿审核，未动插件代码。颜色与尺寸对齐现在的深色卡片（#171c2b / #252e40 / #aab9ff / 38×40 字母格）。</div>
+<div class="wrap">
+  <div class="stage">
+    <div class="card" id="card">
+      <div class="eyebrow">VOCABULARY · 六级核心 · 100/417 · 新词</div>
+      <div class="row" id="row"></div>
+      <div class="word" id="word">reward</div>
+      <div class="phon">/rɪˈwɔːd/</div>
+      <div class="hint" id="hint">先尝试回答；需要时可以使用提示。</div>
+      <div class="fx" id="fx"></div>
+    </div>
+    <div class="note" id="status">点右边的档位播放。<b>慢放 0.3×</b> 能看清每一帧的时序。</div>
+  </div>
+
+  <div class="controls">
+    <h2>档位（与用户表现挂钩）</h2>
+    <button data-tier="1">UNBELIEVABLE · 零错且≤3秒</button>
+    <button data-tier="2">PERFECT · 零错</button>
+    <button data-tier="3">GREAT · 错 1 个字母</button>
+    <button data-tier="4">NICE · 用过提示</button>
+    <button data-tier="0">答错 · 不放庆祝</button>
+    <h2 style="margin-top:14px">播放</h2>
+    <button id="replay">▶ 键入 + 庆祝</button>
+    <button id="slow">慢放 0.3×</button>
+    <h2 style="margin-top:14px">时序表（实施用）</h2>
+    <table>
+      <tr><td>字母落格</td><td>180ms · OutBack(1.7) · 上跳 11px + 挤压回弹</td></tr>
+      <tr><td>错字母</td><td>220ms 左右抖动，变红，不放大</td></tr>
+      <tr><td>单词跳出</td><td>420ms · 延迟 60ms · 1→1.34→0.96→1，上移 9px</td></tr>
+      <tr><td>庆祝牌</td><td>进 260ms（0.2→1.14→1，带 -8°→0 回正），停 520ms，退 200ms</td></tr>
+      <tr><td>星芒</td><td>8 颗 4 角星 500ms 放射淡出（仅 T1/T2）</td></tr>
+      <tr><td>彩带</td><td>14 片 900ms 下落旋转（仅 T1）</td></tr>
+      <tr><td>整卡震动</td><td>120ms ±2px（仅 T1，最重的一档）</td></tr>
+      <tr><td>总时长</td><td>最长 980ms，且不挡翻页：回车立刻翻，动画在旧卡上播完</td></tr>
+    </table>
+    <div class="note">
+      <span class="tiername">Qt 侧怎么落地：</span>字母格是 QLineEdit，用 QPropertyAnimation 动 pos（或 geometry）+ QEasingCurve.OutBack；
+      庆祝牌是一个覆盖在卡片上的无边框子控件，动 geometry 的 scale 与 windowOpacity，星芒/彩带用 QPainter 画进一个透明控件（和现在的小喇叭图标同一套路，不引外部图片、不加依赖）。
+      卡片本身已有 <code>QPropertyAnimation</code> 的淡入淡出翻页，时序上是兼容的。
+    </div>
+  </div>
+</div>
+
+<script>
+const WORD = 'reward';
+const row = document.getElementById('row'), fx = document.getElementById('fx'),
+      word = document.getElementById('word'), status = document.getElementById('status'),
+      card = document.getElementById('card');
+let slow = false;
+const ms = v => v * (slow ? 3.4 : 1);
+
+function boxes(){
+  row.innerHTML = '';
+  for (const ch of WORD){
+    const d = document.createElement('div');
+    d.className = 'box empty'; d.textContent = '·';
+    row.appendChild(d);
+  }
+}
+boxes();
+
+const TIERS = {
+  1:{text:'UNBELIEVABLE', sub:'不可思议 · 一次拼对', cls:'t1', spark:true,  conf:true,  shake:true},
+  2:{text:'PERFECT',      sub:'完美拼写',            cls:'t2', spark:true,  conf:false, shake:false},
+  3:{text:'GREAT',        sub:'差一点点',            cls:'t3', spark:false, conf:false, shake:false},
+  4:{text:'NICE',         sub:'靠提示想起来了',      cls:'t4', spark:false, conf:false, shake:false},
+  0:{text:'',             sub:'',                    cls:'',   spark:false, conf:false, shake:false}
+};
+
+function star(color){
+  return `<svg viewBox="0 0 24 24" width="14" height="14"><path d="M12 0c1.6 6.2 4.2 8.8 12 12-7.8 3.2-10.4 5.8-12 12-1.6-6.2-4.2-8.8-12-12C7.8 8.8 10.4 6.2 12 0z" fill="${color}"/></svg>`;
+}
+
+function celebrate(tier){
+  const t = TIERS[tier];
+  if (!tier){ status.textContent = '答错：不放庆祝特效，只把答案面正常显示（避免把错误变成惩罚）。'; return; }
+  fx.innerHTML = '';
+  if (t.shake){ card.classList.add('playing'); setTimeout(()=>card.classList.remove('playing'), ms(120)); }
+  if (t.conf){
+    for (let i=0;i<14;i++){
+      const c = document.createElement('div');
+      c.className = 'conf';
+      c.style.left = (6 + i*6.6) + '%';
+      c.style.background = ['#ffd166','#ff70a6','#7cf5ff','#a7f3d0','#cdd9ff'][i%5];
+      c.style.animation = `conffall ${ms(900)}ms cubic-bezier(.3,.7,.4,1) ${ms(i*22)}ms forwards`;
+      fx.appendChild(c);
+    }
+  }
+  if (t.spark){
+    for (let i=0;i<8;i++){
+      const s = document.createElement('div');
+      const a = i/8 * Math.PI*2;
+      s.className = 'spark'; s.style.setProperty('--dx', (Math.cos(a)*90)+'px');
+      s.style.setProperty('--dy', (Math.sin(a)*70)+'px');
+      s.innerHTML = star(['#ffd166','#fff','#7cf5ff'][i%3]);
+      s.style.animation = `sparkfly ${ms(500)}ms ease-out ${ms(40)}ms forwards`;
+      fx.appendChild(s);
+    }
+  }
+  const b = document.createElement('div');
+  b.className = 'badge ' + t.cls;
+  b.innerHTML = t.text + `<small>${t.sub}</small>`;
+  b.style.animation = `badgein ${ms(260)}ms cubic-bezier(.2,1.5,.4,1) forwards, ` +
+                      `badgeout ${ms(200)}ms ease-in ${ms(780)}ms forwards`;
+  fx.appendChild(b);
+  word.style.animation = `bounceword ${ms(420)}ms cubic-bezier(.2,1.3,.4,1) ${ms(60)}ms`;
+  status.innerHTML = `播放 <b>${t.text}</b>（tier ${tier}）：字母逐格跳入 → 单词放大跳出 → 庆祝牌回弹出现。` +
+                     (slow ? '【慢放中】' : '');
+}
+
+function type(tier){
+  boxes();
+  const kids = [...row.children];
+  kids.forEach((el, i) => {
+    setTimeout(() => {
+      el.textContent = WORD[i];
+      el.classList.remove('empty');
+      if (tier === 3 && i === 2){ el.classList.add('bad'); el.style.animation = `nope ${ms(220)}ms`; }
+      else { el.style.animation = `pop ${ms(180)}ms cubic-bezier(.3,1.6,.5,1)`; }
+    }, ms(90 + i*95));
+  });
+  setTimeout(() => {
+    if (tier === 3){ kids[2].classList.remove('bad'); kids[2].style.animation = `pop ${ms(180)}ms`; }
+    celebrate(tier);
+  }, ms(90 + kids.length*95 + 120));
+}
+
+document.querySelectorAll('[data-tier]').forEach(btn => btn.onclick = () => type(+btn.dataset.tier));
+document.getElementById('replay').onclick = () => type(1);
+document.getElementById('slow').onclick = function(){ slow = !slow; this.classList.toggle('on', slow); };
+type(2);
+</script>
+</div>
+</body>
+</html>

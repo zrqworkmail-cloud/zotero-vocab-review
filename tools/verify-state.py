@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -52,7 +53,10 @@ def sha256(path: Path) -> str:
 
 def run(*cmd: str) -> str:
     try:
-        done = subprocess.run(cmd, capture_output=True, text=True, errors='replace', timeout=30)
+        # The tools here emit UTF-8 (node's ℹ, Python's 中文 test names); decoding with
+        # the Windows console code page turns that into replacement characters.
+        done = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8',
+                              errors='replace', timeout=30)
         return (done.stdout or '') + (done.stderr or '')
     except Exception as error:  # a missing tool is a finding, not a crash
         return '%s: %s' % (type(error).__name__, error)
@@ -153,69 +157,162 @@ def layer_loaded() -> list:
 
 
 # --------------------------------------------------------------- config layer
+def load_logic():
+    spec = importlib.util.spec_from_file_location('verify_review_logic', SRC / 'review_logic.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def layer_config() -> list:
     meta = installed_dir() / 'meta.json'
     if not meta.exists():
         return ['no meta.json']
     config = json.loads(meta.read_text(encoding='utf-8')).get('config', {})
+    try:
+        logic = load_logic()
+    except Exception as error:
+        return ['cannot read the book model: %s: %s' % (type(error).__name__, error)]
     lines = []
-    scope = [key for key in ('review_scope_decks', 'review_scope_tags', 'review_tags_all', 'review_scope_name')
-             if key in config]
-    lines.append('scope keys saved: %s' % (', '.join(scope) if scope else
-                                           'none — using the legacy deck/book path'))
-    if config.get('review_book'):
-        lines.append('  legacy review_book=%r still set (read as its tag, rewritten on next save)' % config['review_book'])
+    saved = str(config.get('study_book') or '').strip()
+    book = logic.study_book(config)
+    if book:
+        origin = 'study_book' if saved == book['id'] else 'legacy keys, rewritten on next save'
+        lines.append('book: %s (%s) via %s' % (book['name'], book['id'], origin))
+    else:
+        lines.append('*** no book selected — the toolbar and settings will say 未选词书')
+    legacy = [key for key in ('review_scope_decks', 'review_scope_tags', 'review_tags_all',
+                              'review_scope_name', 'review_book')
+              if config.get(key) not in (None, '', [], {}, False)]
+    if legacy:
+        lines.append('  legacy scope keys still saved: %s (ignored once study_book is set)' % ', '.join(legacy))
 
-    decks = None
     try:
         decks = set(anki_connect('deckNames'))
     except Exception:
-        pass
-    if decks is None:
-        lines.append('  deck existence: not checked (AnkiConnect unavailable)')
+        lines.append('  deck/tag existence: not checked (AnkiConnect unavailable)')
         return lines
-    wanted = list(config.get('review_scope_decks') or [])
-    if not wanted:
-        wanted = [config.get('review_main_deck') or config.get('deck')] + list(config.get('review_extra_decks') or [])
-    missing = sorted({name for name in wanted if name and name not in decks})
-    if missing:
-        lines.append('  *** %d configured deck(s) do not exist in this account: %s' % (len(missing), '、'.join(missing)))
-        lines.append('  *** half the daily plan is counting an empty scope; open Settings and clear them')
-    else:
-        lines.append('  every configured deck exists in the account')
+    capture = str(config.get('deck') or '')
+    if capture:
+        lines.append('  capture deck %s: %s' % (capture, 'present' if capture in decks else '*** missing'))
+    if not book:
+        return lines
+    if book.get('deck'):
+        lines.append('  book deck %s: %s' % (book['deck'], 'present' if book['deck'] in decks else '*** missing'))
     try:
-        known = set(anki_connect('getTags'))
+        tags = set(anki_connect('getTags'))
     except Exception:
-        known = set()
-    tags = [tag for tag in re.findall(r'zvr_\w+', json.dumps(config)) if known and tag not in known]
-    if tags:
-        lines.append('  *** tags referenced but absent from the collection: %s' % '、'.join(sorted(set(tags))))
+        lines.append('  book tag: not checked (getTags unavailable)')
+        return lines
+    if book.get('tag'):
+        lines.append('  book tag %s: %s' % (book['tag'], 'present' if book['tag'] in tags else '*** absent from the collection'))
     return lines
 
 
 # ----------------------------------------------------------- on-screen layer
+def desktop_is_visible() -> tuple:
+    """BitBlt a few patches of the real screen and see whether anything is drawn.
+
+    The old check looked for LogonUI/LockApp in tasklist, which is a false positive:
+    LogonUI keeps running after the session is unlocked, so the panel claimed the screen
+    was locked while the user was in the middle of reviewing cards. A locked session
+    answers with pure black, so the pixels themselves are the honest signal.
+    """
+    import ctypes
+
+    gdi32, user32 = ctypes.windll.gdi32, ctypes.windll.user32
+    handle = ctypes.c_void_p
+    for function in (user32.GetDC, gdi32.CreateCompatibleDC,
+                     gdi32.CreateCompatibleBitmap, gdi32.SelectObject):
+        function.restype = handle
+    for function in (gdi32.BitBlt, gdi32.GetDIBits, gdi32.DeleteObject, gdi32.DeleteDC, user32.ReleaseDC):
+        function.restype = ctypes.c_int
+    gdi32.BitBlt.argtypes = [handle, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                             handle, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+    gdi32.GetDIBits.argtypes = [handle, handle, ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p,
+                                ctypes.c_void_p, ctypes.c_uint]
+    gdi32.CreateCompatibleDC.argtypes = [handle]
+    gdi32.CreateCompatibleBitmap.argtypes = [handle, ctypes.c_int, ctypes.c_int]
+    gdi32.SelectObject.argtypes = [handle, handle]
+    gdi32.DeleteObject.argtypes = [handle]
+    gdi32.DeleteDC.argtypes = [handle]
+    user32.GetDC.argtypes = [handle]
+    user32.ReleaseDC.argtypes = [handle, handle]
+    user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+    user32.GetSystemMetrics.restype = ctypes.c_int
+
+    class BitmapInfoHeader(ctypes.Structure):
+        _fields_ = [('biSize', ctypes.c_uint32), ('biWidth', ctypes.c_int32), ('biHeight', ctypes.c_int32),
+                    ('biPlanes', ctypes.c_uint16), ('biBitCount', ctypes.c_uint16),
+                    ('biCompression', ctypes.c_uint32), ('biSizeImage', ctypes.c_uint32),
+                    ('biXPelsPerMeter', ctypes.c_int32), ('biYPelsPerMeter', ctypes.c_int32),
+                    ('biClrUsed', ctypes.c_uint32), ('biClrImportant', ctypes.c_uint32)]
+
+    side = 120
+    screen = user32.GetDC(None)
+    if not screen:
+        return False, 'no desktop DC'
+    width, height = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+    spots = [(width // 2, height // 2), (width // 4, height // 4), (width // 2, height - side - 8)]
+    lit = 0
+    try:
+        for left, top in spots:
+            memory = gdi32.CreateCompatibleDC(screen)
+            bitmap = gdi32.CreateCompatibleBitmap(screen, side, side)
+            if not memory or not bitmap:
+                return False, 'no compatible bitmap'
+            try:
+                gdi32.SelectObject(memory, bitmap)
+                if not gdi32.BitBlt(memory, 0, 0, side, side, screen, left, top, 0x00CC0020):
+                    return False, 'BitBlt failed'
+                buffer = ctypes.create_string_buffer(side * side * 4)
+                info = BitmapInfoHeader(biSize=ctypes.sizeof(BitmapInfoHeader), biWidth=side,
+                                        biHeight=-side, biPlanes=1, biBitCount=32)
+                if not gdi32.GetDIBits(memory, bitmap, 0, side, buffer, ctypes.byref(info), 0):
+                    return False, 'GetDIBits failed'
+                raw = buffer.raw
+                lit += sum(1 for index in range(0, len(raw), 4) if raw[index:index + 3] != b'\x00\x00\x00')
+            finally:
+                gdi32.DeleteObject(bitmap)
+                gdi32.DeleteDC(memory)
+    finally:
+        user32.ReleaseDC(None, screen)
+    return lit > 100, '%d lit pixels of %d sampled' % (lit, side * side * len(spots))
+
+
 def layer_onscreen() -> list:
-    out = run('tasklist', '/FI', 'IMAGENAME eq LogonUI.exe', '/NH') + run('tasklist', '/FI', 'IMAGENAME eq LockApp.exe', '/NH')
-    if 'LogonUI.exe' in out or 'LockApp.exe' in out:
-        return ['SESSION LOCKED — screenshots come back black and SendInput goes nowhere.',
+    live, detail = desktop_is_visible()
+    if not live:
+        return ['SCREEN NOT VISIBLE (%s) — screenshots come back black and SendInput goes nowhere.' % detail,
                 'Nothing on the real interface can be accepted until the screen is unlocked.']
-    return ['desktop appears unlocked; on-screen acceptance is possible but has not been done by this script']
+    return ['desktop is visible (%s); on-screen acceptance is possible but has not been done by this script' % detail]
 
 
 # ------------------------------------------------------------------ test layer
 def layer_tests() -> list:
     lines = []
     unit = run(sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_*.py')
-    lines.append('unittest: ' + (unit.strip().splitlines()[-1] if unit.strip() else 'no output'))
+    ran = re.search(r'^Ran (\d+) tests?', unit, re.M)
+    verdict = 'OK' if re.search(r'^OK$', unit, re.M) else ('FAILED' if 'FAILED' in unit else 'no verdict')
+    lines.append('unittest: %s tests, %s' % (ran.group(1) if ran else '?', verdict))
     node = run('node', '--test', 'tests/plugin.test.cjs')
-    summary = [line for line in node.splitlines() if line.startswith('# ')]
-    lines.append('node: ' + (' '.join(s.replace('# ', '') for s in summary) if summary else 'no summary'))
+    counts = {}
+    for line in node.splitlines():
+        match = re.match(r'^(?:#|ℹ)\s*(tests|pass|fail|skipped)\s+(\d+)', line.strip())
+        if match:
+            counts[match.group(1)] = match.group(2)
+    lines.append('node: ' + (' '.join('%s %s' % (key, counts[key]) for key in ('tests', 'pass', 'fail', 'skipped')
+                                     if key in counts) if counts else 'no summary'))
     qt = run(sys.executable, 'tests/run-windows-checks.py')
     lines.append('Qt checks: ' + (qt.strip().splitlines()[-1] if qt.strip() else 'no output'))
     return lines
 
 
 def main() -> int:
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except (AttributeError, OSError):
+        pass
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--tests', action='store_true', help='also run the three suites (slow)')
     args = parser.parse_args()

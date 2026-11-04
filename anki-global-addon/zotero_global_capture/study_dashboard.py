@@ -61,12 +61,21 @@ def dashboard_html(today, deadline, plan, activity, dark=False, auto_plan=False)
         new_goal = max(0, plan['new_goal'])
         review_done = max(0, plan['review_done'])
         review_goal = max(0, plan['review_goal'])
+        book_total = int(plan.get('book_total') or 0)
+        book_learned = int(plan.get('book_learned') or 0)
+        remaining_new = plan.get('remaining_new_total', 0)
+        # The tag counter in Anki's browser includes every note type; the plan counts
+        # only the configured model and excludes what has already been studied. Say
+        # both numbers here so 485 (tag) and 434 (new left) cannot look like a bug.
+        scope = (('当前词书共 %d 张 · 已学 %d · 剩余新卡 %d 张（只统计所选笔记类型）'
+                  % (book_total, book_learned, remaining_new)) if book_total else
+                 ('当前范围剩余新卡 %d 张；按所选牌组和笔记类型统计。' % remaining_new))
         plan_content = ('<div class="zvr-small">今日学习计划 · 已完成 / 目标</div>'
                         '<div class="zvr-plan">新学 <b>%d / %d</b> <span>剩余 %d</span><br>'
                         '复习 <b>%d / %d</b> <span>剩余 %d</span></div>'
-                        '<div class="zvr-small">当前范围剩余新卡 %d 张；按所选牌组和笔记类型统计。</div>' %
+                        '<div class="zvr-small">%s</div>' %
                         (new_done, new_goal, new_remaining, review_done, review_goal, plan['review_remaining'],
-                         plan.get('remaining_new_total', 0)))
+                         scope))
     else:
         plan_content = '<div class="zvr-plan">今日建议新词 <b>%d</b>　待复习 <b>%d</b><br>今日已学习 <b>%d</b> 张卡片</div>' % (new_remaining, due, done)
     return '''<style>

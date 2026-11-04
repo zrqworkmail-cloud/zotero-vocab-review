@@ -13,11 +13,31 @@ from aqt.qt import (
     QPainter, QPushButton, QScrollArea, QStyle, QTimer, QUrl, QVBoxLayout, QWidget, pyqtSignal, Qt,
 )
 
-from .review_logic import (answer_matches, clean_detail, clean_text, cloze_sentence, collection_plan, end_of_session_reason, example_groups, exam_word_labels, format_meaning, link_example_html, literature_example_html, masked_example, mask_answer_clues, meaning_table, next_check_delay, plan_limits_new, root_detail_html,
-                           next_hint_index, prepare_question, book_label, session_batch_size, should_style_card, spelling_hint, spoken_examples, submit_review, suggested_ease, today_remaining, updated_session_target, window_wait)
-from . import morphology, word_relations
+from .review_logic import (answer_matches, BOOK_LABEL_SOURCES, clean_detail, clean_text, cloze_sentence, collection_plan, EASE_NAMES, end_of_session_reason, example_groups, exam_word_labels, format_meaning, link_example_html, literature_example_html, masked_example, mask_answer_clues, meaning_table, next_check_delay, plan_limits_new, root_detail_html,
+                           next_hint_index, prepare_question, hint_share, book_availability, book_label, book_progress, MASTERED_TAG, mark_mastered, meaning_markers, session_batch_size, should_style_card, spelling_hint, spoken_examples, submit_review, suggested_ease, suggests_mastering, today_remaining, updated_session_target, window_wait)
+from . import morphology, word_relations, speech, motion_view
+from .card_motion import mode as motion_mode, tier_for
+from .card_icons import pin_icon, speaker_icon
 from .input_mode import ReviewInputMode
 
+
+# The 【解释】 body sits this far in from its heading, so the part-of-speech lines
+# read as the content of the heading rather than as a sibling block.
+MEANING_INDENT = 20
+
+# The speaker disc is drawn to the height of the letters beside it: the word is 27px in
+# the stylesheet and a card heading 12px. One size for both made the word's disc look like
+# a dot and the heading's like a plate.
+WORD_SPEAKER = 28
+HEADING_SPEAKER = 20
+
+# The word-list pills at the foot of the card. These are the stylesheet's own numbers:
+# the card is measured against them before anything is shown, so a pill cannot be sized
+# from one set of padding and painted from another.
+CHIP_FONT_PX = 12
+CHIP_PADDING_X = 7
+CHIP_PADDING_Y = 2
+CHIP_GAP = 6
 
 POPUP_STYLE = """
 QDialog { background: #f4f6fb; color: #1e293b; font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; }
@@ -31,20 +51,30 @@ QLabel#answer { color: #27344d; background: #ffffff; border: 1px solid #e0e7f2;
                 border-radius: 12px; padding: 12px; font-size: 14px; }
 QLabel#result { font-size: 18px; font-weight: 700; padding: 6px; }
 QLabel#status { color: #66758d; font-size: 12px; }
+/* The one line that decides whether the session continues has to be readable at a glance,
+   not 12px grey like ordinary status text (user 2026-11-04: 把字弄的大一点醒目一点). */
+QLabel#breakHint { color: #172554; font-size: 20px; font-weight: 700; }
 QLabel#cardHeading { color: #64749a; font-size: 12px; font-weight: 700; background: transparent; }
 QLabel#meaningHeading { color: #64749a; font-size: 15px; font-weight: 700; background: transparent; }
 QLabel#cardText { color: #27344d; font-size: 14px; font-weight: normal; background: transparent; }
 QPushButton { background: #ffffff; color: #27344d; border: 1px solid #dce4f1;
               border-radius: 10px; padding: 9px 12px; text-align: center; font-size: 13px; }
-QPushButton#choice { text-align: left; }
+/* A push button cannot word-wrap, which is why an option used to be cut at 45
+   characters. The row keeps the letter in its own column so a wrapped meaning
+   hangs aligned under the text, not under the letter. */
+QWidget#choice { background: #ffffff; border: 1px solid #dce4f1; border-radius: 10px; }
+QWidget#choice:hover { background: #eef2ff; border-color: #8996e8; }
+QLabel#choiceLetter { color: #5668ca; font-size: 14px; font-weight: 700; background: transparent; }
+QLabel#choiceText { color: #27344d; font-size: 14px; background: transparent; }
 QPushButton:hover { background: #eef2ff; border-color: #8996e8; }
 QPushButton:disabled { color: #8c98aa; background: #f0f2f6; }
 QPushButton#primary { background: #5668ca; color: white; border: none; text-align: center; font-weight: 600; }
 QPushButton#primary:hover { background: #4557b5; }
 /* The suggestion is an outline, so it reads as "Enter would use this" rather than
    "this is already decided". Only the button the user actually picks fills in. */
-QPushButton#suggest { background: #eef2ff; color: #27344d; border: 1px solid #8996e8; text-align: center; }
-QPushButton#suggest:hover, QPushButton#suggest:focus { background: #e3eafd; border-color: #5668ca; }
+QPushButton#suggest, QPushButton#suggestMastered { background: #eef2ff; color: #27344d; border: 1px solid #8996e8; text-align: center; }
+QPushButton#suggest:hover, QPushButton#suggest:focus,
+QPushButton#suggestMastered:hover, QPushButton#suggestMastered:focus { background: #e3eafd; border-color: #5668ca; }
 QPushButton#chosen { background: #5668ca; color: white; border: 1px solid #4557b5; text-align: center; font-weight: 600; }
 QPushButton#chosen:disabled { background: #5668ca; color: white; }
 QPushButton#secondary { background: transparent; border: none; color: #728096; text-align: center; }
@@ -55,10 +85,16 @@ QScrollArea { border: none; background: transparent; }
 QWidget#answerContent { background: #f4f6fb; }
 QWidget#letterRow { background: #f4f6fb; }
 QWidget#questionBlock { background: #f4f6fb; }
+QWidget#breakCard { background: #f4f6fb; }
 QWidget#detailCard { background: white; border: 1px solid #e0e7f2; border-radius: 12px; }
-QPushButton#speaker { background: #eef2ff; border: 1px solid transparent; border-radius: 16px; padding: 5px; }
-QPushButton#speaker:hover, QPushButton#speaker:focus { border: 1px solid #8996e8; border-radius: 16px; }
+QPushButton#speaker { background: transparent; border: none; padding: 0; }
+QPushButton#speaker:hover, QPushButton#speaker:focus { background: transparent; border: none; }
 QPushButton#cardMenu { background: transparent; border: none; color: #64749a; font-size: 22px; padding: 0; }
+QPushButton#pin { background: transparent; border: 1px solid #dce4f1; padding: 2px; }
+QPushButton#pin:hover, QPushButton#pin:checked { background: #eef2ff; border-color: #8996e8; }
+QLabel#bookChip { color: #5668ca; background: #eef2ff; border-radius: 8px; padding: 2px 7px;
+                  margin: 0; font-size: 12px; font-weight: 600; }
+QWidget#bookChipRow { background: transparent; }
 QMenu { background: #ffffff; color: #27344d; border: 1px solid #dce4f1; }
 QMenu::item:selected { background: #eef2ff; color: #27344d; }
 """
@@ -82,9 +118,14 @@ def popup_style(cfg):
     if cfg.get('review_theme', 'light') == 'dark':
         for old, new in _DARK_COLORS.items():
             style = style.replace(old, new)
-        # The platform volume icon is dark; keep its button light for contrast.
-        style += '\nQPushButton#speaker { background: #d9e2ff; }'
     return style
+
+
+# The speaker disc and glyph per theme: the platform volume icon is dark, so the light
+# theme needs a dark glyph on a pale disc, and the dark theme the other way round.
+SPEAKER_COLORS = {'light': ('#27344d', '#eef2ff', '#8996e8'),
+                  'dark': ('#1b2333', '#cdd9ff', '#8fa0e8')}
+PIN_COLORS = {'light': '#5668ca', 'dark': '#aab9ff'}
 
 
 CARD_STYLE = """
@@ -139,11 +180,28 @@ def _meaning_label(text, name):
     font = label.font()
     font.setPixelSize(15 if name == 'meaning' else 14)
     metrics = QFontMetrics(font)
-    parts = re.findall(r'(?m)^([A-Za-z]+\.)', format_meaning(text))
+    parts = meaning_markers(text)
     width = max((metrics.horizontalAdvance(part) for part in parts), default=0) + 8
     label.setTextFormat(Qt.TextFormat.RichText)
-    label.setText(meaning_table(text, width))
+    # Indented so the adj./n. lines read as the body of the 【解释】 heading above them.
+    label.setText(meaning_table(text, width, MEANING_INDENT))
     return label
+
+
+def size_rating_button(button):
+    """Let each rating button keep its own width, and widen the card to fit the row.
+
+    `Ignored` was the first attempt: the row would share whatever width the card had, so the
+    window could never jump mid-answer. But Ignored also hides a button's size hint from the
+    layout's arithmetic — and a push button's hint carries the style's own minimum button
+    width — so the card's computed minimum came out ~45 px narrower than the row really is,
+    and the last button fell off the right edge on every real card. `Minimum` keeps the hint
+    in the arithmetic; the row is centred, so the gap left of A equals the gap right of E.
+    """
+    policy = button.sizePolicy()
+    policy.setHorizontalPolicy(type(policy.horizontalPolicy()).Minimum)
+    button.setSizePolicy(policy)
+    return button
 
 
 class ClickAwayFilter(QObject):
@@ -196,6 +254,13 @@ class LetterBox(QLineEdit):
         color = ('#71e0b5' if dark else '#198765') if value.casefold() == expected.casefold() else ('#ff99a9' if dark else '#d34d61')
         base = ('background: #252e40; color: #edf1fa; border: 1px solid #4a5971;' if dark else 'background: white; border: 1px solid #dce4f1;') + ' border-radius: 8px; padding: 2px; font-size: 18px;'
         self.setStyleSheet(base + (' color: %s; font-weight: 700;' % color if value else ''))
+        if value and self.owner.letter_motion_allowed():
+            # Land it or shake it: the difference the learner is trying to learn from is
+            # right there in the box they just typed into.
+            if value.casefold() == expected.casefold():
+                motion_view.hop(self)
+            else:
+                motion_view.shake(self)
         if value and self.index + 1 < len(self.owner.letter_boxes):
             self.owner.letter_boxes[self.index + 1].setFocus()
 
@@ -242,7 +307,116 @@ class LetterBox(QLineEdit):
         super().keyPressEvent(event)
 
 
+class _ChoiceRow(QWidget):
+    """One answer: a letter column plus a meaning column that wraps on its own.
+
+    QPushButton cannot word-wrap, so options used to be truncated at 45 characters
+    and the letter sat inside the text. Here the letter keeps a fixed column and the
+    wrapped lines line up under the text instead of under the letter.
+    """
+    clicked = pyqtSignal()
+
+    def __init__(self, letter, text, parent=None):
+        super().__init__(parent)
+        self.setObjectName('choice')
+        # Without this Qt paints the widget with the plain palette and ignores the
+        # stylesheet's background and border, so the option looked like loose text
+        # instead of a boxed choice.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(12, 9, 12, 9)
+        row.setSpacing(10)
+        # The boxes are stretched to share the answer area, so the letter and its meaning
+        # have to sit in the middle of the box instead of clinging to its top edge.
+        row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        self.letter_label = QLabel(letter)
+        self.letter_label.setObjectName('choiceLetter')
+        self.letter_label.setFixedWidth(18)
+        self.letter_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        self.text_label = QLabel(text)
+        self.text_label.setObjectName('choiceText')
+        self.text_label.setWordWrap(True)
+        # Top-aligned like the letter column: a vertically centred label would drop the
+        # first line below the letter whenever the row is stretched.
+        self.text_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.text_label.setTextFormat(Qt.TextFormat.PlainText)
+        row.addWidget(self.letter_label)
+        row.addWidget(self.text_label, 1)
+
+    def click(self):
+        self.clicked.emit()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.click()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+def stop_speech():
+    """Cut whatever Anki is still reading out.
+
+    Speech runs on Anki's own audio thread, so without this the next card would keep
+    hearing the previous word, and a dismissed card would keep talking in the dark.
+    """
+    try:
+        from aqt.sound import av_player
+        stop = getattr(av_player, 'stop_and_clear_queue', None)
+        if stop:
+            stop()
+    except Exception:
+        pass
+
+
+def set_topmost_band(window, pinned):
+    """Move the window between the topmost and normal bands, and report whether it worked.
+
+    Clearing `WindowStaysOnTopHint` takes the style bit off, but Windows keeps a window in
+    the top band until `SetWindowPos` is told otherwise — which is how the unpin button
+    could look dead even while the flag was correct. Qt does this itself on some paths and
+    not on others, so the card asks explicitly. Off Windows, and under the offscreen test
+    platform, there is no band to change and this just reports False.
+    """
+    try:
+        import ctypes
+        handle = int(window.winId())
+        if not handle:
+            return False
+        band = ctypes.c_void_p(-1 if pinned else 0)     # HWND_TOPMOST / HWND_NOTOPMOST
+        flags = 0x0001 | 0x0002 | 0x0010               # NOMOVE | NOSIZE | NOACTIVATE
+        return bool(ctypes.windll.user32.SetWindowPos(ctypes.c_void_p(handle), band,
+                                                      0, 0, 0, 0, flags))
+    except Exception:
+        return False
+
+
 class ReviewDialog(QDialog):
+    mastered = pyqtSignal(object)
+    pin_changed = pyqtSignal(bool)
+    # 回看上一张: the card asks, the controller decides — only it knows what was already
+    # answered, and a look-back must never reach the scheduler.
+    review_requested = pyqtSignal(object)
+    review_back_requested = pyqtSignal(object)
+    # On the class, not only in __init__: an event can reach `eventFilter` before the
+    # constructor has run as far as the stylesheet, and reading a missing attribute inside
+    # an event filter aborts the process instead of raising a catchable error.
+    review_note = None
+    suppress_speech = False
+    # Counts speech requests across every card, so a render that finishes after the next
+    # card has taken the screen is dropped instead of speaking the older word.
+    speech_generation = 0
+    # Same reason as above: the hint breakdown is read while painting the answer face, and
+    # an event can arrive before __init__ reaches these lines.
+    audio_hint_uses = 0
+    other_hint_uses = 0
+    revealed_indices = ()
+    # The celebration overlay is built on the first spelling card that earns one, and it is
+    # a child of this card, so hiding the card must hide it with it.
+    celebration = None
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         child = getattr(self, '_embedded_dialog', None)
@@ -264,20 +438,47 @@ class ReviewDialog(QDialog):
         self._relations_dirty = False
         self.relation_labels = {}
         self.answer_shown = False
+        # 看回题目: whichever widgets the answer face folded away are remembered, so F can
+        # bring back exactly what was there — and the card knows which face it is showing.
+        self.front_widgets = []
+        self.showing_front = False
         self.input_mode = ReviewInputMode()
         self.finished.connect(lambda _result: self.input_mode.restore())
         self.enter_ease = None
+        self.enter_mastered = False
+        self.answer_seconds = None
+        self.shown_at = None
         self.grading = False
         self.force_again = False
         self.completed = False
         self.skipped = False
         self.hints = 0
         self.hint_uses = 0
+        # The three kinds of hint are priced differently now (2026-11-04): listening to the
+        # word once is nearly free, a revealed letter costs what its position is worth, and
+        # 释义/例句 still hands over the direction of the answer. `hint_uses` stays the total
+        # for the scheduler-facing rules, these feed the recommendation.
+        self.audio_hint_uses = 0
+        self.other_hint_uses = 0
+        self.revealed_indices = set()
         self.incorrect_letters = 0
         self.failed_attempts = 0
         self.setWindowTitle('单词随身复习')
-        self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint |
-                            Qt.WindowType.WindowCloseButtonHint)
+        # A normal window, not a Qt tool window: tool windows have no taskbar button and
+        # Windows hides them the moment the app loses focus, which is how an unpinned card
+        # "disappeared" when the user clicked elsewhere. The minimise and maximise buttons
+        # are what make Windows offer its snap layouts when the card is dragged to a screen
+        # edge. Pinning is per pop-up — a new card always starts on top.
+        flags = (Qt.WindowType.Window | Qt.WindowType.WindowMinimizeButtonHint
+                 | Qt.WindowType.WindowMaximizeButtonHint | Qt.WindowType.WindowCloseButtonHint)
+        if self.cfg.get('review_pin', True):
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        try:
+            # The taskbar button should look like Anki, not like an anonymous Qt window.
+            self.setWindowIcon(mw.windowIcon())
+        except Exception:
+            pass
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
         self.setStyleSheet(popup_style(self.cfg))
         self.resize(510, 570)
@@ -296,6 +497,14 @@ class ReviewDialog(QDialog):
                                               '，已学 %d / 共 %d' % (learned, total) if total else ''))
         eyebrow.setWordWrap(False)
         top.addWidget(eyebrow, 1)
+        self.pin_button = QPushButton()
+        self.pin_button.setObjectName('pin')
+        self.pin_button.setCheckable(True)
+        self.pin_button.setFixedSize(30, 30)
+        self.pin_button.setChecked(bool(self.cfg.get('review_pin', True)))
+        self._set_pin_icon()
+        self.pin_button.toggled.connect(self.apply_pin)
+        top.addWidget(self.pin_button)
         menu_button = QPushButton('...')
         menu_button.setObjectName('cardMenu')
         menu_button.setFixedSize(32, 32)
@@ -306,9 +515,24 @@ class ReviewDialog(QDialog):
         settings_action.triggered.connect(lambda: open_settings(self) if open_settings else None)
         mechanism = menu.addAction('评分与复习机制')
         mechanism.triggered.connect(lambda: QMessageBox.information(self, '评分与复习机制',
-            '答错或直接显示答案按“再练一次”。答对时会根据拼写错误和提示次数建议评分；你也可以自己调整。复习日期由 Anki 排程决定。'))
+            '答错或直接显示答案按 Again。答对时会根据拼写错误和提示次数建议评分；你也可以自己调整。复习日期由 Anki 排程决定。'))
+        # The answer face used to carry a whole row of its own for this one action
+        # (「不评分，结束」). Escape already did it, the row cost vertical space the
+        # explanations need, so the action moved here and the row went away.
+        ungraded = menu.addAction('不评分，结束')
+        ungraded.triggered.connect(self.reject)
+        front_action = menu.addAction('看回题目（F）')
+        front_action.triggered.connect(lambda _checked=False: self.toggle_front())
+        look_back = menu.addAction('回看上一张（P）')
+        look_back.triggered.connect(lambda _checked=False: self.review_requested.emit(self))
         zotero = menu.addAction('Zotero 配套插件介绍与下载')
         zotero.triggered.connect(lambda: QDesktopServices.openUrl(QUrl('https://github.com/zrqworkmail-cloud/zotero-vocab-review')))
+        # The card outlives the deck browser for this user, so the two window decisions
+        # belong here rather than in a menu they have to go back to Anki to find.
+        hide_main = menu.addAction('隐藏 Anki 主窗口')
+        hide_main.triggered.connect(self.hide_main_window)
+        quit_anki = menu.addAction('退出 Anki')
+        quit_anki.triggered.connect(self.quit_anki)
         menu_button.setMenu(menu)
         top.addWidget(menu_button)
         layout.addLayout(top)
@@ -318,12 +542,6 @@ class ReviewDialog(QDialog):
         progress_text = '本组 %s  ·  %s' % (progress, today_text)
         progress_label = _plain_label(progress_text, 'status')
         progress_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        if question.get('_new_group'):
-            progress_label.setText('已自动进入下一组  ·  ' + progress_text)
-            timer = QTimer(progress_label)
-            timer.setSingleShot(True)
-            timer.timeout.connect(lambda: progress_label.setText(progress_text))
-            timer.start(2500)
         layout.addWidget(progress_label)
         mode = question['mode']
         prompt = {'choice': '选择正确的中文释义', 'reverse': '选择对应的英文单词',
@@ -347,17 +565,24 @@ class ReviewDialog(QDialog):
             if mode == 'listening':
                 self.meaning_heading.hide()
                 self.question_label.hide()
-                self.listen_button = QPushButton('重新播放单词')
-                self.listen_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume))
-                self.listen_button.setAccessibleName('重新播放单词发音')
-                self.listen_button.clicked.connect(self.play_listening_prompt)
-                block_layout.insertWidget(0, self.listen_button)
+                listen_row = QHBoxLayout()
+                # The replay control is the same round speaker button as everywhere
+                # else; a wide text button made this card look like another window.
+                self.listen_button = self.speaker_button([question['word']], '重新播放单词发音',
+                                                         on_click=self.play_listening_prompt)
+                listen_row.addWidget(self.listen_button)
+                listen_row.addWidget(_plain_label('重听发音', 'status'))
+                listen_row.addStretch()
+                block_layout.insertLayout(0, listen_row)
                 self.listening_explanation = _plain_label('单词和释义暂时隐藏；点击下方“释义提示”查看中文。', 'status')
                 self.listening_explanation.setWordWrap(True)
                 block_layout.insertWidget(1, self.listening_explanation)
             layout.addWidget(self.question_block)
         else:
             self.question_label = _plain_label(content, 'question')
+            # The prompt is the word itself here, so it sits on the card's centre line
+            # like the answer face does; a left-aligned word reads like a heading.
+            self.question_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
             layout.addWidget(self.question_label)
         if mode == 'judgment':
             self.judgment_label = _meaning_label(mask(question['judgment_statement']), 'meaning')
@@ -388,6 +613,7 @@ class ReviewDialog(QDialog):
             block_layout.addWidget(self.question_examples)
         if mode == 'choice' and question.get('phonetic'):
             self.phonetic_label = _plain_label(question['phonetic'], 'status')
+            self.phonetic_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
             layout.addWidget(self.phonetic_label)
 
         self.input = None
@@ -406,14 +632,12 @@ class ReviewDialog(QDialog):
                        else ('正确' if question['judgment_correct'] else '错误'))
             for index, option in enumerate(question['options']):
                 display_option = mask(option) if mode == 'choice' else option
-                visible = display_option if len(display_option) <= 45 else display_option[:45] + '…'
-                button = QPushButton('%s   %s' % (chr(65 + index), visible))
-                button.setObjectName('choice')
-                button.setToolTip(display_option)
-                button.clicked.connect(lambda _checked=False, value=option: self.reveal(value == correct))
-                self.choice_buttons.append(button)
-                button.installEventFilter(self)
-                layout.addWidget(button)
+                row = _ChoiceRow(chr(65 + index), display_option)
+                row.setToolTip(display_option)
+                row.clicked.connect(lambda _checked=False, value=option: self.reveal(value == correct))
+                self.choice_buttons.append(row)
+                row.installEventFilter(self)
+                layout.addWidget(row, 1)
             self.installEventFilter(self)
         elif mode == 'speaking':
             self.spoken_answer_button = QPushButton('我已说出，查看答案')
@@ -482,9 +706,16 @@ class ReviewDialog(QDialog):
         self.answer_layout.setSpacing(8)
         self.answer_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         word_row = QHBoxLayout()
+        # The word is the thing that should sit on the centre line, so the speaker's own
+        # width is balanced by an empty spacer on the other side: with equal weight on both
+        # sides of the label, the word itself is centred and the speaker just hugs it.
+        word_row.setSpacing(0)
         word_row.addStretch()
+        word_row.addSpacing(WORD_SPEAKER + 6)
         word_row.addWidget(self.answer_word)
-        word_row.addWidget(self.speaker_button([question['word']], '朗读单词'))
+        word_row.addSpacing(6)
+        self.answer_speaker = self.speaker_button([question['word']], '朗读单词', size=WORD_SPEAKER)
+        word_row.addWidget(self.answer_speaker)
         word_row.addStretch()
         self.answer_layout.addLayout(word_row)
         self.answer_phonetic = _plain_label(question.get('phonetic', ''), 'status')
@@ -493,7 +724,10 @@ class ReviewDialog(QDialog):
         self.answer_labels = []
         self.answer_scroll = QScrollArea()
         self.answer_scroll.setWidgetResizable(True)
-        self.answer_scroll.setMinimumHeight(120)
+        self.answer_scroll.setMinimumHeight(240)
+        # The explanations are the reason the card exists, so they get the floor and every
+        # pixel the user wins by enlarging the window (the layout gives them the only
+        # stretch factor). The ratings and the word-list pills stay compact below it.
         self.answer_scroll.setWidget(answer_content)
         self.answer_scroll.hide()
         layout.addWidget(self.answer_scroll)
@@ -510,26 +744,230 @@ class ReviewDialog(QDialog):
         self.grade_widget = QWidget()
         grade_layout = QHBoxLayout(self.grade_widget)
         grade_layout.setContentsMargins(0, 0, 0, 0)
+        # Centred, so the empty gap to the left of A. Again equals the one to the right of
+        # E. Mastered rather than all of it piling up on one side.
+        grade_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self.grade_buttons = []
-        for letter, (caption, ease) in enumerate((('再练一次', 1), ('困难', 2), ('记住了', 3), ('很容易', 4))):
+        for letter, (caption, ease) in enumerate((('Again', 1), ('Hard', 2), ('Good', 3), ('Easy', 4))):
             button = QPushButton()
             button.setProperty('gradeCaption', caption)
             button.setProperty('gradeEase', ease)
+            size_rating_button(button)
             button.clicked.connect(lambda _checked=False, value=ease: self.start_grade(value))
             self.grade_buttons.append(button)
             grade_layout.addWidget(button)
         self.label_grade_buttons()
+        # "I already know this" rides in the rating row, right of Easy, on E: it is the
+        # same decision the row is for, and one click shorter than suspending by hand.
+        self.mastered_button = QPushButton('E. Mastered')
+        self.mastered_button.setObjectName('mastered')
+        size_rating_button(self.mastered_button)
+        self.size_grade_button(self.mastered_button)
+        self.mastered_button.setAccessibleName('标记为已掌握并停止学习')
+        self.mastered_button.setToolTip('按 E 挂起这张卡（Anki 的 Suspend），释义和复习历史都不动；'
+                                        '搜 tag:%s 可以批量找回' % MASTERED_TAG)
+        self.mastered_button.clicked.connect(lambda: self.mastered.emit(self))
+        grade_layout.addWidget(self.mastered_button)
         self.grade_widget.hide()
         layout.addWidget(self.grade_widget)
         self.later = QPushButton('稍后再说')
         self.later.setObjectName('secondary')
         self.later.clicked.connect(self.reject)
         layout.addWidget(self.later)
+        # 回看上一张的页脚。一张已经评过分、不会再排程的卡能给的只有两件事：再看一张，
+        # 或者回去 —— 评分行在这种卡上必须消失。
+        self.review_bar = QWidget()
+        self.review_bar.setObjectName('reviewBar')
+        review_layout = QHBoxLayout(self.review_bar)
+        review_layout.setContentsMargins(0, 0, 0, 0)
+        review_layout.setSpacing(8)
+        self.review_back_button = QPushButton('← 上一张')
+        self.review_back_button.setObjectName('reviewBack')
+        self.review_back_button.clicked.connect(lambda _checked=False: self.review_back_requested.emit(self))
+        self.review_exit_button = QPushButton('退出回看')
+        self.review_exit_button.setObjectName('reviewExit')
+        self.review_exit_button.clicked.connect(self.reject)
+        review_layout.addWidget(self.review_back_button)
+        review_layout.addWidget(self.review_exit_button)
+        self.review_bar.hide()
+        layout.addWidget(self.review_bar)
+        # Which exam lists the word belongs to belongs at the foot of the card as one small
+        # pill per list, and the provenance rides on the pill it explains. A single label
+        # joined with "·" used to lose its last name and leave a dangling dot behind, which
+        # read as a typo rather than as truncated text.
+        self.book_chip = QWidget()
+        self.book_chip.setObjectName('bookChipRow')
+        chip_row = QHBoxLayout(self.book_chip)
+        chip_row.setContentsMargins(0, 0, 0, 0)
+        chip_row.setSpacing(CHIP_GAP)
+        # Aligning the layout, not the layout item: the pills then keep their own size hint
+        # instead of being stretched into three wide bars.
+        chip_row.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+        # Decided here rather than at reveal because the card is sized to fit them once, at
+        # birth: a word in three lists needs more room than the rating row.
+        self.book_chips = []
+        for label in exam_word_labels(question['word']):
+            # Not _plain_label: that turns word wrap on, and a wrapped QLabel's size hint is
+            # a guess at a paragraph rather than the width of four characters — which is how
+            # these boxes ended up roomier than their text.
+            pill = QLabel(label)
+            pill.setTextFormat(Qt.TextFormat.PlainText)
+            pill.setObjectName('bookChip')
+            # A QLabel that draws a stylesheet frame indents its text by two characters'
+            # width unless told otherwise, which made each pill 12px wider than its text.
+            pill.setIndent(0)
+            pill.setMargin(0)
+            source = BOOK_LABEL_SOURCES.get(label)
+            if source:
+                pill.setToolTip('来源：%s' % source)
+            chip_row.addWidget(pill)
+            self.book_chips.append(pill)
+        self.book_chip.hide()
+        # Stretch 0: the pills belong under the rating row, not in whatever band is left
+        # over. With a stretch factor they drifted to the foot of a half-empty card and the
+        # gap above them read as a broken layout.
+        layout.addWidget(self.book_chip)
+        self.fit_card_width()
+
+    def fit_card_width(self):
+        """Widen the card once, at birth, so nothing on it has to be clipped.
+
+        Two rows decide the width: the five ratings, which share one line, and the
+        word-list pills, which are never allowed to be squeezed. Measuring with the dialog's
+        font was not enough — the stylesheet paints the buttons with its own family, and the
+        row came out narrower than its own text on the real machine while every offscreen
+        check stayed green. Everything here is measured with the widget's own polished font,
+        and `ensure_row_fits()` re-checks the row once it is actually on screen.
+        """
+        row = self.grade_widget.layout()
+        buttons = [button for button in self.grade_buttons + [self.mastered_button] if button.text()]
+        for button in buttons:
+            button.ensurePolished()
+            button.setMinimumWidth(QFontMetrics(button.font()).horizontalAdvance(button.text()) + 26)
+        needed = self.row_demand()
+        needed = max(needed, sum(button.sizeHint().width() for button in buttons)
+                     + row.spacing() * max(0, len(buttons) - 1))
+        margins = self.layout().contentsMargins()
+        room = margins.left() + margins.right() + 8
+        chip_width = 0
+        for pill in self.book_chips:
+            pill.ensurePolished()
+            # Each pill is its text plus the stylesheet's own horizontal padding, and +2 for
+            # the border the label paints.
+            chip_width += QFontMetrics(pill.font()).horizontalAdvance(pill.text()) \
+                + 2 * CHIP_PADDING_X + 2
+        chip_width += CHIP_GAP * max(0, len(self.book_chips) - 1)
+        room = margins.left() + margins.right() + 8
+        # Qt's own arithmetic over the children's minimums, as a check on the estimates: the
+        # row is measured with the font the card paints with, and an estimate that comes in
+        # short shows up here as a wider demand.
+        demanded = self.layout().totalMinimumSize().width()
+        width = max(510, needed + room, chip_width + room, demanded + 8)
+        try:
+            from . import log_runtime
+            log_runtime('card sized for %s: width=%d row=%d chips=%d layout-min=%d' % (
+                self.question['word'], width, needed + room, chip_width + room, demanded))
+        except Exception:
+            pass
+        self.setMinimumWidth(width)
+        if needed:
+            self.grade_widget.setMinimumWidth(needed + 2)
+        self.resize(width, self.height())
+
+    def card_window(self):
+        """The window this card is actually drawn in.
+
+        An in-place swap embeds the new card inside the old card's window, so resizing
+        `self` there would make the widget larger than the window that shows it: the front
+        face came back as a pile of overlapping pixels. The host window is the thing with
+        the title bar, and its resizeEvent already keeps the embedded card filling it.
+        """
+        return self.window() if getattr(self, '_embedded', False) else self
+
+    def fit_card_height(self):
+        """Trim the dead band the answer leaves behind, and never touch the width.
+
+        The window is sized for the question face, which is often taller than the answer:
+        the leftover height then sits inside the details area and the foot of the card looks
+        half-empty. Width is deliberately not recomputed here — a width change mid-flip is
+        the jump that was already rejected, and the row is sized for it at birth.
+        """
+        hint = self.layout().sizeHint().height()
+        if hint <= 0:
+            return
+        window = self.card_window()
+        if window is not self:
+            # An embedded card does not own its height; the window it lives in does.
+            return
+        if window.height() - hint < 24:
+            return
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            hint = min(hint, screen.availableGeometry().height() - 120)
+        window.resize(window.width(), max(360, min(window.height(), hint)))
+        window.update()
+
+    def ensure_row_fits(self):
+        """Make the window as wide as its own content asks for, once it is on screen.
+
+        The width is settled at birth so a normal flip never jumps — but every estimate made
+        before the card is visible has come out short on the real machine (the log said
+        `row=486 layout-min=466` while the pixels needed ~476), because a hidden widget's size
+        hint is computed before the stylesheet's font has fully reached it. Once the row is
+        laid out, Qt's own `totalSizeHint()` is no longer a guess, so the card grows to it.
+        The three numbers are logged either way, so the next card tells us if anything is
+        still being under-read.
+        """
+        margins = self.layout().contentsMargins()
+        # Re-measure with the fonts the buttons actually have now that they are on screen:
+        # a hidden widget's size hint is computed before the stylesheet's face has fully
+        # reached it, and every width settled at birth has come out short because of that.
+        for button in self.visible_grade_buttons() + [self.mastered_button]:
+            if button.text() and not button.isHidden():
+                self.size_grade_button(button)
+        laid = self.layout().totalSizeHint().width()
+        minimum = self.layout().totalMinimumSize().width()
+        demand = max(self.row_demand() + margins.left() + margins.right(), laid, minimum)
+        # The window that shows this card, not the card itself: an embedded card resized on
+        # its own would grow past the frame that paints it and leave stale pixels behind.
+        window = self.card_window()
+        if demand + 4 > window.width():
+            try:
+                from . import log_runtime
+                log_runtime('card widened at reveal for %s: %d -> %d (row=%d sizeHint=%d minimum=%d)' % (
+                    self.question['word'], window.width(), demand + 8,
+                    self.row_demand() + margins.left() + margins.right(), laid, minimum))
+            except Exception:
+                pass
+            window.resize(demand + 8, window.height())
+            window.update()
+        else:
+            try:
+                from . import log_runtime
+                log_runtime('row fit for %s: card=%d row=%d sizeHint=%d minimum=%d' % (
+                    self.question['word'], window.width(), self.row_demand()
+                    + margins.left() + margins.right(), laid, minimum))
+            except Exception:
+                pass
+        return demand
 
     def showEvent(self, event):
         super().showEvent(event)
+        # The reaction window is measured from the moment this card appeared, not from the
+        # moment the answer was checked.
+        self.shown_at = time.monotonic()
+        # Whatever the previous card was still reading belongs to that card.
+        stop_speech()
+        ReviewDialog.speech_generation += 1
+        # Every pop-up starts on top, so the band is re-asserted here as well as in the
+        # flags: Windows remembers the band, not the flag.
+        if int(self.window().windowFlags()) & int(Qt.WindowType.WindowStaysOnTopHint):
+            set_topmost_band(self.window(), True)
         if hasattr(self, 'question_examples'):
             QTimer.singleShot(0, self.resize_question_examples)
+        # Once the window is laid out, Qt's own size hints are final — so settle the width
+        # here, before the answer can appear, instead of jumping when it does.
+        QTimer.singleShot(0, self.ensure_row_fits)
         previous = getattr(self, '_handoff_geometry', None)
         if getattr(self, '_embedded', False):
             pass
@@ -580,6 +1018,59 @@ class ReviewDialog(QDialog):
             self.adjustSize()
             self.position_window()
 
+    def _set_pin_icon(self):
+        """The pushpin carries the state: upright and filled, or tipped over as a line."""
+        pinned = self.pin_button.isChecked()
+        theme = 'dark' if self.cfg.get('review_theme') == 'dark' else 'light'
+        self.pin_button.setIcon(pin_icon(pinned, PIN_COLORS[theme]))
+        self.pin_button.setToolTip('卡片置顶中，点击取消置顶' if pinned else '卡片未置顶，点击让它总在最前面')
+        self.pin_button.setAccessibleName('已置顶' if pinned else '未置顶')
+
+    def apply_pin(self, pinned):
+        """Re-apply the flags on the top-level window without losing where it sits.
+
+        After a flip the card is a child embedded in the host window, and window flags on
+        a child do nothing at all — so the host is what has to change. Qt also hides a
+        widget whose flags change, which is why this shows it again at the same place.
+        """
+        window = self.window()
+        flags = window.windowFlags()
+        if pinned:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        else:
+            flags &= ~Qt.WindowType.WindowStaysOnTopHint
+        visible = window.isVisible()
+        geometry = window.geometry()
+        window.setWindowFlags(flags)
+        if visible:
+            window.show()
+            window.setGeometry(geometry)
+        set_topmost_band(window, pinned)
+        if pinned:
+            window.raise_()
+        self._set_pin_icon()
+        self.pin_changed.emit(bool(pinned))
+
+    def hide_main_window(self):
+        try:
+            mw.hide()
+        except Exception as error:
+            self.status.setText('主窗口没能隐藏：%s' % type(error).__name__)
+
+    def quit_anki(self):
+        """Quit for real: the close filter only hides the window while a card is up."""
+        try:
+            mw.zvr_force_quit = True
+            # The user also runs a tray add-on, which rewrites mw.closeEvent so that closing
+            # a window only hides it, and performs a real shutdown only under its own flag.
+            # Without that flag 「退出 Anki」 would send the windows to the tray and leave
+            # Anki running — so set it when that add-on is the one holding closeEvent.
+            if hasattr(mw, 'closeEventFromAction'):
+                mw.closeEventFromAction = True
+            mw.close()
+        except Exception as error:
+            self.status.setText('Anki 没能退出：%s' % type(error).__name__)
+
     def position_window(self):
         screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
         if screen:
@@ -589,15 +1080,29 @@ class ReviewDialog(QDialog):
             else:
                 self.move(area.right() - self.width() - 20, area.bottom() - self.height() - 20)
 
-    def speaker_button(self, texts, tooltip, hint=False):
+    def themed_speaker_icon(self, size=32):
+        glyph, disc, ring = SPEAKER_COLORS['dark' if self.cfg.get('review_theme') == 'dark' else 'light']
+        return speaker_icon(glyph, disc, ring, size)
+
+    def speaker_button(self, texts, tooltip, hint=False, size=32, on_click=None):
+        """A round speaker the disc actually fills the button.
+
+        The icon was drawn at 32px but never given an icon size, and a push button's
+        default is 16 — so the disc arrived on screen at half the size it was drawn.
+        """
+        from PyQt6.QtCore import QSize
         button = QPushButton()
         button.setObjectName('speaker')
-        button.setFixedSize(32, 32)
-        button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume))
+        button.setFixedSize(size, size)
+        button.setIcon(self.themed_speaker_icon(size))
+        button.setIconSize(QSize(size, size))
         button.setToolTip(tooltip)
         button.setAccessibleName(tooltip)
         button.setEnabled(bool(texts))
-        button.clicked.connect(lambda: self.hear_hint(texts) if hint else self.speak_many(texts))
+        if on_click is not None:
+            button.clicked.connect(on_click)
+        else:
+            button.clicked.connect(lambda: self.hear_hint(texts) if hint else self.speak_many(texts))
         return button
 
     def add_detail(self, heading, text, audio=False):
@@ -618,7 +1123,8 @@ class ReviewDialog(QDialog):
         header.addWidget(heading_label)
         header.addStretch()
         if audio_texts is not None:
-            header.addWidget(self.speaker_button(audio_texts, '朗读%s' % heading, hint=hint))
+            header.addWidget(self.speaker_button(audio_texts, '朗读%s' % heading, hint=hint,
+                                                 size=HEADING_SPEAKER))
         column.addLayout(header)
         label = _meaning_label(text, 'cardText') if heading == '解释' else _plain_label(text, 'cardText')
         if heading != '解释':
@@ -659,9 +1165,27 @@ class ReviewDialog(QDialog):
         self.letter_boxes[index].setPlaceholderText(self.letter_positions[index][1])
         self.hints += 1
         self.hint_uses += 1
+        self._note_revealed(index)
         self.status.setText('已显示部分字母，可继续尝试；按空格可再提示一个字母。')
         if self.cfg.get('review_hint_audio', False):
             self.speak_many([self.letter_positions[index][1]])
+
+    def _note_revealed(self, index):
+        """Record which letter position a Space hint gave away, by index not by count."""
+        if not isinstance(self.revealed_indices, set):
+            self.revealed_indices = set(self.revealed_indices)
+        self.revealed_indices.add(index)
+
+    def hint_components(self):
+        """The hint record the recommendation is computed from.
+
+        `letters` is the number of boxes the word is actually spelled into, so the share is
+        measured against this word, not against a fixed guess.
+        """
+        return {'audio_hints': int(self.audio_hint_uses or 0),
+                'other_hints': int(self.other_hint_uses or 0),
+                'revealed': set(self.revealed_indices or ()),
+                'letters': len(self.letter_positions or ())}
 
     def request_example_hint(self):
         groups = example_groups(self.question.get('example', '')) + example_groups(self.question.get('literature', ''))
@@ -686,10 +1210,33 @@ class ReviewDialog(QDialog):
         self.question_block.layout().addWidget(card)
         self.example_hint_button.setEnabled(False)
         self.hint_uses += 1
+        self.other_hint_uses += 1
         self.status.setText('例句中已隐藏目标词；使用提示会计入评分建议。')
         if not getattr(self, '_embedded', False):
             self.adjustSize()
             self.position_window()
+
+    def hint_summary(self):
+        """Say what the hints cost, in the units the recommendation is priced in.
+
+        '提示 2 次' told the learner nothing about why the suggestion moved; the spelling
+        card now names the listen count and the position-weighted share of the word.
+        """
+        record = self.hint_record or {}
+        parts = []
+        if self.audio_hint_uses:
+            parts.append('发音提示 %d 次' % self.audio_hint_uses)
+        revealed = record.get('revealed') or ()
+        letters = record.get('letters') or 0
+        if revealed and letters:
+            parts.append('字母提示 %d/%d（按位置已给出 %d%%）' % (
+                len(revealed), letters, round(hint_share(revealed, letters) * 100)))
+        if record.get('other_hints'):
+            parts.append('释义/例句提示 %d 次' % record['other_hints'])
+        if parts:
+            return '，'.join(parts)
+        return '无提示' if self.question['mode'] == 'typing' else (
+            '提示 %d 次' % self.hint_uses if self.hint_uses else '无提示')
 
     def input_complete_and_correct(self):
         return bool(self.letter_boxes) and all(
@@ -718,6 +1265,7 @@ class ReviewDialog(QDialog):
         self.question_label.show()
         self.meaning_hint_button.setEnabled(False)
         self.hint_uses += 1
+        self.other_hint_uses += 1
         self.status.setText('已显示释义提示；使用提示会计入评分建议。')
         if not getattr(self, '_embedded', False):
             self.adjustSize()
@@ -726,16 +1274,28 @@ class ReviewDialog(QDialog):
     def hear_hint(self, texts):
         if self.speak_many(texts) is not False:
             self.hint_uses += 1
+            self.audio_hint_uses += 1
 
     def speak_many(self, texts):
         try:
-            from anki.sound import TTSTag
             from aqt.sound import av_player
-            av_player.play_tags([TTSTag(field_text=text[:500], lang='en_US', voices=[], speed=1.0, other_args=[]) for text in texts if text])
-            return True
+            stop_speech()
+            ReviewDialog.speech_generation += 1
+            token = ReviewDialog.speech_generation
+            return speech.speak(av_player, mw.taskman, texts, self.cfg.get('review_volume', 100),
+                                self.tts_tag, on_error=self.speech_failed,
+                                is_stale=lambda: token != ReviewDialog.speech_generation)
         except Exception:
             self.status.setText(self.status.text() + ' 系统语音不可用，请检查 Anki 的英文语音设置。')
             return False
+
+    def speech_failed(self, error):
+        # Loudness is not worth silence: the render failed, so say so instead of nothing.
+        self.status.setText(self.status.text() + ' 加大音量时朗读失败，可把朗读音量调回 100%。')
+
+    def tts_tag(self, text):
+        from anki.sound import TTSTag
+        return TTSTag(field_text=str(text)[:500], lang='en_US', voices=[], speed=1.0, other_args=[])
 
     def changeEvent(self, event):
         if event.type() == QEvent.Type.ActivationChange and not self.isActiveWindow():
@@ -745,20 +1305,62 @@ class ReviewDialog(QDialog):
     def eventFilter(self, watched, event):
         if isinstance(watched, QWidget) and watched is not self and not self.isAncestorOf(watched):
             return super().eventFilter(watched, event)
+        if self.review_note is not None:
+            # A look-back answers nothing: P/Esc go home, B walks one further back, and
+            # every other key is left to Qt.
+            if event.type() == QEvent.Type.KeyPress and event.modifiers() == Qt.KeyboardModifier.NoModifier:
+                if event.key() in (Qt.Key.Key_P, Qt.Key.Key_Escape):
+                    self.reject()
+                    event.accept()
+                    return True
+                if event.key() == Qt.Key.Key_B:
+                    self.review_back_requested.emit(self)
+                    event.accept()
+                    return True
+            return super().eventFilter(watched, event)
         if (not self.answer_shown and self.choice_buttons and event.type() == QEvent.Type.KeyPress
                 and event.modifiers() == Qt.KeyboardModifier.NoModifier):
+            if event.key() == Qt.Key.Key_E:
+                self.mastered.emit(self)
+                event.accept()
+                return True
             index = event.key() - Qt.Key.Key_A
             if 0 <= index < len(self.choice_buttons):
                 self.choice_buttons[index].click()
                 event.accept()
                 return True
         if self.answer_shown and event.type() == QEvent.Type.KeyPress and event.modifiers() == Qt.KeyboardModifier.NoModifier:
+            if event.key() == Qt.Key.Key_F:
+                # 看回题目: the answer stays revealed as far as Anki is concerned, this only
+                # turns the card over again.
+                self.toggle_front()
+                event.accept()
+                return True
+            if event.key() == Qt.Key.Key_P:
+                self.review_requested.emit(self)
+                event.accept()
+                return True
+            if self.showing_front:
+                # Reading the prompt back is not a moment to rate it, so A–E and Enter stay
+                # inert while the front is up.
+                return super().eventFilter(watched, event)
+            if event.key() == Qt.Key.Key_E:
+                self.mastered.emit(self)
+                event.accept()
+                return True
             index = event.key() - Qt.Key.Key_A
             if 0 <= index < 4 and self.grade_with_letter(index):
                 event.accept()
                 return True
         if self.answer_shown and event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            if not self.grading and self.enter_ease is not None:
+            if self.grading:
+                event.accept()
+                return True
+            if self.enter_mastered:
+                # Enter does what the status line just recommended: a flawless spelling
+                # means the word is already known, so it is suspended rather than graded.
+                self.mastered.emit(self)
+            elif self.enter_ease is not None:
                 self.start_grade(self.enter_ease)
             event.accept()
             return True
@@ -771,6 +1373,10 @@ class ReviewDialog(QDialog):
         # cannot live there.
         if (self.question['mode'] == 'speaking' and not self.answer_shown
                 and event.modifiers() == Qt.KeyboardModifier.NoModifier):
+            if event.key() == Qt.Key.Key_E:
+                self.mastered.emit(self)
+                event.accept()
+                return True
             if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 self.spoken_answer_button.click()
                 event.accept()
@@ -781,6 +1387,127 @@ class ReviewDialog(QDialog):
                 return
         super().keyPressEvent(event)
 
+    def hide_front(self):
+        """Fold the question face away, and remember exactly which widgets that was.
+
+        Only widgets that were actually visible are recorded, so 看回题目 cannot resurrect a
+        hint button that this question type never showed.
+        """
+        candidates = list(self.choice_buttons) + [
+            getattr(self, 'prompt_label', None), getattr(self, 'question_label', None),
+            getattr(self, 'question_block', None),
+            getattr(self, 'meaning_heading', None), getattr(self, 'phonetic_label', None),
+            getattr(self, 'judgment_label', None), getattr(self, 'spoken_answer_button', None),
+            getattr(self, 'spoken_unknown_button', None), getattr(self, 'letter_scroll', None),
+            getattr(self, 'example_hint_button', None),
+            getattr(self, 'meaning_hint_button', None), getattr(self, 'check_button', None),
+            getattr(self, 'hint_button', None), getattr(self, 'answer_button', None)]
+        self.front_widgets = [widget for widget in candidates if widget is not None and widget.isVisible()]
+        for widget in self.front_widgets:
+            widget.hide()
+
+    def answer_widgets(self):
+        """The answer face as a set, so it can be folded away in one move."""
+        word_row = self.answer_word.parentWidget()
+        return [widget for widget in (word_row, self.answer_scroll, self.result_label, self.status,
+                                      self.grade_widget, self.book_chip) if widget is not None]
+
+    def show_front_face(self, visible):
+        """Look at the question again without un-revealing the answer.
+
+        The answer stays revealed as far as Anki is concerned — this is a look, not a redo —
+        so the rating row is hidden while the front is up: pressing A–E should not fire while
+        the user is only reading the prompt back. Width never changes here; only the height
+        follows the content, and the top edge stays where it was.
+        """
+        self.showing_front = visible
+        for widget in self.front_widgets:
+            widget.setVisible(visible)
+        for widget in self.answer_widgets():
+            widget.setVisible(not visible)
+        self.fit_card_height()
+        # Ask the window to paint the whole area again: the two faces do not cover the same
+        # pixels, and whatever the other face drew has to be erased, not left as a ghost.
+        self.card_window().update()
+
+    def toggle_front(self):
+        if not self.answer_shown or self.grading:
+            return False
+        self.show_front_face(not self.showing_front)
+        return True
+
+    def enter_review(self):
+        """Show this card the way it was left: answer up, ratings gone.
+
+        The look-back is a look. The counters are restored so the answer face reads the same
+        as it did at the time, the word is not spoken again, and the rating row is replaced
+        by the footer — pressing A–E on a card that is already scheduled would either be
+        refused by Anki or, worse, silently re-answer it.
+        """
+        note = self.review_note or {}
+        self.hint_uses = int(note.get('hint_uses') or 0)
+        self.incorrect_letters = int(note.get('incorrect_letters') or 0)
+        self.failed_attempts = int(note.get('failed_attempts') or 0)
+        # The hint breakdown travels with the card, so a look-back reads the same
+        # recommendation line it showed at the time.
+        record = note.get('hint_record') or {}
+        self.audio_hint_uses = int(record.get('audio_hints') or 0)
+        self.other_hint_uses = int(record.get('other_hints') or 0)
+        self.revealed_indices = set(record.get('revealed') or ())
+        self.suppress_speech = True
+        try:
+            self.reveal(note.get('correct', True))
+        finally:
+            self.suppress_speech = False
+        self.grade_widget.hide()
+        self.later.hide()
+        timing = '（用时 %.1f 秒）' % note['seconds'] if note.get('seconds') else ''
+        self.status.setText('回看 · 这张已评分为「%s」%s，不会再排程；按 P 或 Esc 退出回看，按 B 看更早的一张。' %
+                            (note.get('rating') or '已评分', timing))
+        self.status.show()
+        self.review_bar.show()
+        self.fit_card_height()
+        return True
+
+    def card_motion_mode(self):
+        return motion_mode(self.cfg)
+
+    def letter_motion_allowed(self):
+        """The per-keystroke hop is feedback while answering, so it stops once the answer is up."""
+        return self.card_motion_mode() != 'off' and not self.answer_shown
+
+    def play_celebration(self, correct):
+        """The badge for a spelling that earned one — never on a look-back or a wrong answer.
+
+        Tier comes from `card_motion.tier_for`, which only ever answers for the typing card:
+        a choice card answered in half a second is recognition, not spelling, and it must not
+        be rewarded with confetti.
+        """
+        if self.review_note is not None or self.suppress_speech or not correct:
+            return
+        tier = tier_for(self.question['mode'], correct, self.incorrect_letters,
+                        self.hint_uses, self.failed_attempts, self.answer_seconds)
+        setting_mode = self.card_motion_mode()
+        if not tier or setting_mode == 'off':
+            return
+        if self.celebration is None:
+            self.celebration = motion_view.Celebration(self, self.cfg.get('review_theme', 'light'))
+        self.celebration.play(tier, setting_mode)
+        try:
+            from . import log_runtime
+            log_runtime('card motion: tier=%d mode=%s word=%s' % (
+                tier, setting_mode, self.question.get('word', '')))
+        except Exception:
+            pass
+
+    def hideEvent(self, event):
+        # A celebration must not outlive the card it belongs to: the handover hides the old
+        # card under the new one, and an overlay left visible is exactly the ghosting shape
+        # AUDIT §9.32 recorded.
+        if self.celebration is not None:
+            self.celebration.stop()
+        super().hideEvent(event)
+
     def reveal(self, correct):
         if self.answer_shown:
             return
@@ -788,45 +1515,35 @@ class ReviewDialog(QDialog):
         self._flipping = True
         try:
             self.answer_shown = True
-            self.enter_ease = None if correct is None else suggested_ease(correct, self.hint_uses, self.incorrect_letters, self.failed_attempts)
-            for button in self.choice_buttons:
-                button.hide()
-            self.prompt_label.hide()
-            self.question_label.hide()
-            if hasattr(self, 'question_block'):
-                self.question_block.hide()
-            if hasattr(self, 'meaning_heading'):
-                self.meaning_heading.hide()
-            if hasattr(self, 'phonetic_label'):
-                self.phonetic_label.hide()
-            if hasattr(self, 'judgment_label'):
-                self.judgment_label.hide()
-            if self.spoken_answer_button is not None:
-                self.spoken_answer_button.hide()
-                self.spoken_unknown_button.hide()
-            if self.letter_boxes:
-                self.letter_scroll.hide()
-                if hasattr(self, 'example_hint_button'):
-                    self.example_hint_button.hide()
-                if hasattr(self, 'meaning_hint_button'):
-                    self.meaning_hint_button.hide()
-                for button in (self.check_button, self.hint_button, self.answer_button):
-                    button.hide()
+            self.last_correct = correct
+            # Only the spelling card reports its hints by kind: 听一遍 is nearly free there,
+            # a revealed letter is priced by position, and the other question types keep the
+            # old blanket "a hint was used" rule until the user says otherwise.
+            self.hint_record = (self.hint_components()
+                                if self.question['mode'] == 'typing' else {})
+            self.enter_ease = None if correct is None else suggested_ease(
+                correct, self.hint_uses, self.incorrect_letters, self.failed_attempts,
+                self.question['mode'], **self.hint_record)
+            # A flawless spelling is the one answer that means "stop studying this word",
+            # so the card offers Mastered as the suggestion and puts the cursor on E.
+            self.answer_seconds = None if self.shown_at is None else time.monotonic() - self.shown_at
+            self.enter_mastered = correct is not None and suggests_mastering(
+                self.question['mode'], correct, self.hint_uses, self.incorrect_letters,
+                self.failed_attempts, self.answer_seconds)
+            self.hide_front()
             shown = syllable_display(self.question['word'])
             self.answer_word.setText(shown)
             self.answer_word.setToolTip(
                 self.question['word'] if shown == self.question['word']
                 else '%s\n音节分段来源：Moby 音节词表；不代表词根词缀。' % self.question['word'])
-            labels = exam_word_labels(self.question['word'])
-            if labels:
-                sources = []
-                if any(label in labels for label in ('四级词表', '六级词表')):
-                    sources.append('ECDICT 四六级词表')
-                if '六级社区核心词' in labels:
-                    sources.append('CET-6 Top 500 社区整理')
-                self.add_detail('词表归属', ' · '.join(labels) + '\n来源：' + '；'.join(sources))
-            if self.answer_form.casefold() != self.question['word'].casefold():
-                self.add_detail('例句中的形式', self.answer_form)
+            if self.book_chips:
+                # Built at birth, so the card already knows how wide it has to be.
+                self.book_chip.show()
+            # The cloze asks for the headword, so the inflected form the sentence used has to
+            # be shown here or the learner never sees why the blank was shorter.
+            shown = self.question.get('cloze_shown') or ''
+            if shown and shown.casefold() != self.question['word'].casefold():
+                self.add_detail('例句中的形式', shown)
             if self.question.get('source_form', self.question['word']).casefold() != self.question['word'].casefold():
                 self.add_detail('收录时的词形', self.question['source_form'])
             self.add_detail('解释', self.question['meaning'])
@@ -864,38 +1581,59 @@ class ReviewDialog(QDialog):
             self.answer_scroll.show()
             self.force_again = correct is False
             for index, button in enumerate(self.grade_buttons, 1):
-                button.setObjectName('suggest' if index == self.enter_ease else '')
+                button.setObjectName('' if self.enter_mastered else
+                                     ('suggest' if index == self.enter_ease else ''))
                 button.style().unpolish(button)
                 button.style().polish(button)
-            rating_name = {1: '再练一次', 2: '困难', 3: '记住了', 4: '很容易'}.get(self.enter_ease)
+            self.mastered_button.setObjectName('suggestMastered' if self.enter_mastered else 'mastered')
+            self.mastered_button.style().unpolish(self.mastered_button)
+            self.mastered_button.style().polish(self.mastered_button)
+            rating_name = 'Mastered' if self.enter_mastered else {1: 'Again', 2: 'Hard', 3: 'Good', 4: 'Easy'}.get(self.enter_ease)
             if correct is None:
                 self.status.setText('请听发音并选择评分；此题不会自动识别或上传语音。')
             elif not correct:
                 self.status.setText('回答错误或已查看答案：按 A 记录并继续（回车同样）。')
             else:
-                self.status.setText('错误字母 %d 次，提示 %d 次，检查失败 %d 次；建议“%s”，回车继续，也可按 A–D 自行评分。' %
-                                    (self.incorrect_letters, self.hint_uses, self.failed_attempts, rating_name))
+                # The clock is part of the evidence for everything except spelling, so the
+                # line shows it: a right answer at 4.2 秒 explains why E was not offered.
+                timing = '' if self.question['mode'] == 'typing' or self.answer_seconds is None \
+                    else '（用时 %.1f 秒）' % self.answer_seconds
+                self.status.setText('%s，错误字母 %d 次，检查失败 %d 次；建议“%s”%s，回车继续，也可按 A–E 自行评分；按 F 看回题目，按 P 回看上一张。' %
+                                    (self.hint_summary(), self.incorrect_letters,
+                                     self.failed_attempts, rating_name, timing))
             self.grade_widget.show()
+            if self.enter_mastered:
+                # The cursor moves to E so that Enter does what the line just said.
+                self.mastered_button.setFocus()
             if self.force_again:
                 # A wrong answer may only record Again, then offers 继续学习; the other
                 # three eases would invite a rating Anki is not allowed to take.
-                self.grade_buttons[0].setProperty('gradeCaption', '再练一次并继续')
+                self.grade_buttons[0].setProperty('gradeCaption', 'Again 并继续')
                 self.grade_buttons[2].setProperty('gradeCaption', '继续学习')
                 self.grade_buttons[1].hide()
                 self.grade_buttons[3].hide()
             self.label_grade_buttons()
-            self.later.setText('不评分，结束')
+            # 「不评分，结束」 used to take a row of its own under the ratings; Escape and the
+            # card menu still do it, and the space belongs to the explanations.
+            self.later.hide()
+            # Still inside the disabled-updates block: the answer's own height is trimmed in
+            # the same repaint, so the card never shows a tall window with an empty foot.
+            self.fit_card_height()
+            # ... and the row's own minimum is checked once it is on screen, so a short
+            # estimate cuts a button rather than leaving it unread.
+            self.ensure_row_fits()
             for widget in [self] + self.findChildren(QWidget):
                 widget.installEventFilter(self)
         finally:
             self.setUpdatesEnabled(True)
         self.flip_finished()
+        self.play_celebration(correct)
         speech = []
         if self.cfg.get('review_auto_word', True):
             speech.append(self.question['word'])
         mode = self.cfg.get('review_auto_example_mode', 'example' if self.cfg.get('review_auto_example', False) else 'first')
         speech.extend(spoken_examples(self.question.get('example', ''), self.question.get('literature', ''), mode))
-        if any(speech):
+        if any(speech) and not self.suppress_speech:
             self.speak_many(speech)
 
     def visible_grade_buttons(self):
@@ -903,14 +1641,47 @@ class ReviewDialog(QDialog):
         buttons, and then A and B have to mean those two rather than leave D dead."""
         return [button for button in self.grade_buttons if not button.isHidden()]
 
+    def size_grade_button(self, button):
+        """Give each rating button its own floor, so the row cannot cut the longest label.
+
+        `size_rating_button` lets each button keep its own width, and equal shares were
+        wrong when one caption is longer than the rest: "E. Mastered" reached the user as
+        ". Mastere" while "A. Again" still had room to spare. The floor is the stylesheet's
+        own box — 12px padding plus a 1px border on each side — around the text measured
+        with **the button's own font**: the dialog's font is not the one the stylesheet
+        paints with, and that difference is what made every estimate come up short on the
+        real machine while the offscreen checks stayed green.
+        """
+        button.ensurePolished()
+        button.setMinimumWidth(QFontMetrics(button.font()).horizontalAdvance(button.text()) + 26)
+
+    def row_demand(self):
+        """The width the rating row truly needs, measured with the fonts that paint it.
+
+        Each button is as wide as the larger of its own text box and its size hint — the
+        hint carries the style's minimum button width, which is what the row really asks for
+        and what an `Ignored` policy hid from the layout's arithmetic.
+        """
+        buttons = [button for button in self.visible_grade_buttons()
+                   + [self.mastered_button] if button.text() and not button.isHidden()]
+        if not buttons:
+            return 0
+        row = self.grade_widget.layout()
+        width = sum(max(button.sizeHint().width(),
+                        QFontMetrics(button.font()).horizontalAdvance(button.text()) + 26)
+                    for button in buttons) + row.spacing() * max(0, len(buttons) - 1)
+        margins = row.contentsMargins()
+        return width + margins.left() + margins.right()
+
     def label_grade_buttons(self):
-        # The choice options are stacked one per row and can carry their letter; four
-        # rating buttons share one row, and prefixing them pushed the card from 510 to
-        # 536 wide on flip. So the shortcut lives in the tooltip and the status line,
-        # which cost no layout, and the letters still name the visible row in order.
+        # The key sits in front of the word, the way Anki's own review buttons read,
+        # because the row is the only place the user learns which key does what. The
+        # letters name the *visible* buttons: a wrong answer collapses the row to two.
         for letter, button in zip('ABCD', self.visible_grade_buttons()):
-            button.setText(str(button.property('gradeCaption')))
-            button.setToolTip('按 %s 选择「%s」' % (letter, button.property('gradeCaption')))
+            caption = str(button.property('gradeCaption'))
+            button.setText('%s. %s' % (letter, caption))
+            button.setToolTip('按 %s 选择「%s」' % (letter, caption))
+            self.size_grade_button(button)
 
     def grade_with_letter(self, index):
         buttons = self.visible_grade_buttons()
@@ -932,13 +1703,19 @@ class ReviewDialog(QDialog):
             button.setObjectName('chosen' if button is chosen else '')
             button.style().unpolish(button)
             button.style().polish(button)
+        if self.enter_mastered:
+            # Rating the word is a different decision from mastering it, so the
+            # recommendation stops glowing the moment the user picks one of the four.
+            self.enter_mastered = False
+            self.mastered_button.setObjectName('mastered')
+            self.mastered_button.style().unpolish(self.mastered_button)
+            self.mastered_button.style().polish(self.mastered_button)
         self.grading = True
         if self.force_again:
             ease = 1
         for button in self.grade_buttons:
             button.setEnabled(False)
         self.later.setEnabled(False)
-        self.status.setText('正在保存复习结果…')
         self.grade(self, ease)
 
     def flip_finished(self):
@@ -976,17 +1753,109 @@ class ReviewDialog(QDialog):
         self.later.setEnabled(True)
         if error:
             self.status.setText('未能确认评分已保存：%s。请在 Anki 中检查后再复习。' % error)
+            # The row was folded away when the answer appeared; an unconfirmed rating needs a
+            # visible way out, so this one case brings it back with a different meaning.
+            self.later.show()
             self.later.setText('跳过并继续（本次不重试评分）')
             self.later.clicked.disconnect()
             self.later.clicked.connect(self.skip_after_error)
             return
         self.completed = True
-        self.status.setText('复习结果已保存到 Anki。')
+        self.status.setText('本组结束。')
         self.accept()
 
     def skip_after_error(self):
         self.skipped = True
         self.accept()
+
+
+GROUP_BREAK_SECONDS = 3
+
+
+class GroupBreakDialog(QWidget):
+    """The pause between groups, shown inside the card window rather than beside it.
+
+    A finished group used to roll straight into the next one, so "练完一组" quietly became an
+    open-ended session; the countdown puts the decision in front of the user and does nothing
+    if they walk away. It used to be a second window at the card's geometry, which read as two
+    unrelated popups — now it is a panel that covers the card the next group is about to
+    replace, so the switch is one window the whole time.
+    """
+
+    finished = pyqtSignal(int)
+
+    def __init__(self, summary, cfg, geometry=None, parent=None):
+        super().__init__(parent)
+        self.remaining = GROUP_BREAK_SECONDS
+        self.cfg = cfg or {}
+        self.setObjectName('breakCard')
+        # A plain QWidget ignores the stylesheet's background without this, and the panel has
+        # to be opaque: the card it covers is still there underneath.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        if parent is None:
+            # Standalone (the way the tests and any older caller build it) keeps a window.
+            self.setWindowTitle('单词随身复习')
+            self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
+        self.setStyleSheet(popup_style(self.cfg))
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        if geometry is not None:
+            self.setGeometry(geometry)
+        else:
+            self.resize(510, 320)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(26, 22, 26, 22)
+        layout.setSpacing(10)
+        layout.addWidget(_plain_label('VOCABULARY  ·  本组结束', 'eyebrow'), 0, Qt.AlignmentFlag.AlignHCenter)
+        summary_label = _plain_label(summary, 'status')
+        summary_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(summary_label, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.count_label = _plain_label(str(self.remaining), 'question')
+        self.count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.count_label, 1)
+        self.hint = _plain_label('按 Enter 进入下一组学习', 'breakHint')
+        self.hint.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(self.hint, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.timer = QTimer(self)
+        self.timer.setInterval(1000)
+        self.timer.timeout.connect(self._tick)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.activateWindow()
+        self.setFocus()
+        self.timer.start()
+
+    def accept(self):
+        self.finished.emit(int(QDialog.DialogCode.Accepted))
+
+    def reject(self):
+        self.finished.emit(int(QDialog.DialogCode.Rejected))
+
+    def _tick(self):
+        self.remaining -= 1
+        if self.remaining <= 0:
+            self.timer.stop()
+            self.reject()
+            return
+        self.count_label.setText(str(self.remaining))
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.timer.stop()
+            self.accept()
+            return
+        if event.key() == Qt.Key.Key_Escape:
+            self.timer.stop()
+            self.reject()
+            return
+        super().keyPressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.timer.stop()
+            self.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class WordLookupDialog(QDialog):
@@ -1066,7 +1935,8 @@ class WordLookupDialog(QDialog):
 
 class _Signals(QObject):
     prepared = pyqtSignal(object, object, int, bool)
-    saved = pyqtSignal(object, int)
+    saved = pyqtSignal(object, int, object)
+    mastered_done = pyqtSignal(object, str, object, object)
     graded = pyqtSignal(object, object, int, object)
     known = pyqtSignal(object, object, int)
     relations = pyqtSignal(object, object, int)
@@ -1079,6 +1949,7 @@ class DesktopReviewController:
         self.signals = _Signals()
         self.signals.prepared.connect(self._prepared)
         self.signals.saved.connect(self._saved)
+        self.signals.mastered_done.connect(self._mastered)
         self.signals.graded.connect(self._graded)
         self.signals.known.connect(self._known_ready)
         self.signals.relations.connect(self._relations_ready)
@@ -1097,6 +1968,16 @@ class DesktopReviewController:
         self.capture_lookup_cache = {}
         self.session_target = 1
         self.prepared_next = None
+        self.prefetched = None
+        self.prefetch_ready = None
+        self.break_dialog = None
+        self.pending_group = None
+        # 回看上一张: the last few cards the user actually answered, the card we stepped
+        # away from, and how far back the look-back has walked.
+        self.history = []
+        self.paused = None
+        self.review_index = None
+        self.HISTORY_LIMIT = 10
         self.open_settings = None
         self.dictionary = None
         self.add_word = None
@@ -1146,6 +2027,81 @@ class DesktopReviewController:
     def _reviewer_is_foreground(self):
         return mw.state == 'review' and mw.isActiveWindow() and not mw.isMinimized()
 
+    def _next_result(self, cfg, completed, current_target):
+        """Plan, target and the next card for one step of the session.
+
+        The plan is read before the current rating lands, which is why the remaining
+        count subtracts the card in flight and why prepare_question is told to treat
+        one deck slot as already spent.
+        """
+        current_plan = None
+        target = current_target
+        if cfg.get('review_plan_mode') == 'daily':
+            try:
+                current_plan = collection_plan(self.api, cfg)
+                target = updated_session_target(completed, current_plan)
+            except Exception as error:
+                self.log('review plan refresh failed: %s' % type(error).__name__)
+        elif cfg.get('review_deadline') or cfg.get('review_daily_goal'):
+            try:
+                current_plan = collection_plan(self.api, cfg)
+            except Exception as error:
+                self.log('review plan refresh failed: %s' % type(error).__name__)
+        new_group = completed >= target
+        if new_group:
+            target = session_batch_size(cfg, current_plan, manual=True)
+        limits_new = plan_limits_new(cfg)
+        try:
+            next_question = prepare_question(self.api, cfg, cfg.get('review_mode', 'mixed'),
+                                             due_only=bool(limits_new and current_plan is not None and
+                                                           current_plan['new_remaining'] <= 0))
+            if next_question:
+                remaining = today_remaining(current_plan) if current_plan else None
+                next_question['_today_remaining'] = max(0, remaining - 1) if remaining is not None else None
+                # Cards inside a session arrive through here, not through show_next, so
+                # the eyebrow's 已学/总数 has to be stamped on this path too.
+                try:
+                    next_question['_book_progress'] = book_progress(self.api, cfg)
+                except Exception as error:
+                    self.log('book progress unavailable: %s' % type(error).__name__)
+            return (next_question, None, target, new_group,
+                    None if next_question else end_of_session_reason(current_plan, limits_new))
+        except Exception as error:
+            self.log('review preparation failed: %s' % type(error).__name__)
+            return (None, str(error), target, False, None)
+
+    def _start_prefetch(self, dialog):
+        """Choose the next card while the user is still reading this one.
+
+        Picking a card costs several AnkiConnect round trips. Doing that now instead of
+        after the rating is what makes the flip instant. The card on screen is excluded
+        and its deck slot is already counted as spent, so the prefetched card is the one
+        the rating path would have chosen anyway.
+        """
+        question = dialog.question
+        cfg = dict(self.settings())
+        cfg['_review_exclude_card'] = self._current_reviewer_card()
+        cfg['_review_exclude_cards'] = self.session_seen | {question['card_id']}
+        cfg['_review_exclude_words'] = self.session_words | {str(question.get('word', '')).casefold()}
+        cfg['_review_recent_words'] = set(self.recent_words)
+        kind_new = question.get('kind') == 'new'
+        cfg['_review_inflight_new'] = 1 if kind_new else 0
+        cfg['_review_inflight_due'] = 0 if kind_new else 1
+        cfg['_review_prefetch'] = True
+        completed = len(self.session_seen) + 1
+        current_target = self.session_target
+        generation = self.generation
+        key = (generation, frozenset(cfg['_review_exclude_cards']), current_target)
+        ready = threading.Event()
+        self.prefetch_ready = ready
+
+        def work():
+            result = self._next_result(cfg, completed, current_target)
+            if generation == self.generation and self.dialog is dialog and result[0]:
+                self.prefetched = (key, result)
+            ready.set()
+        threading.Thread(target=work, daemon=True).start()
+
     def show_next(self, manual=True, due_only=False, continuation=False):
         if self.busy or self.dialog:
             if manual:
@@ -1164,6 +2120,8 @@ class DesktopReviewController:
             self.session_seen = set()
             self.session_words = set()
             self.capture_lookup_cache.clear()
+            self.prefetched = None
+            self.prefetch_ready = None
             self.session_target = session_batch_size(cfg)
         cfg['_review_exclude_card'] = self._current_reviewer_card()
         cfg['_capture_lookup_cache'] = self.capture_lookup_cache
@@ -1184,21 +2142,55 @@ class DesktopReviewController:
                     if not self.session_target:
                         self.signals.prepared.emit(None, None, generation, manual)
                         return
-                limit_to_due = due_only or (plan is not None and plan['new_remaining'] <= 0)
+                limit_to_due = due_only or (plan is not None and plan['new_remaining'] <= 0 and not manual)
                 question = prepare_question(self.api, cfg, cfg.get('review_mode', 'mixed'), due_only=limit_to_due)
+                reason = None
                 if question:
+                    # The eyebrow says how far this book has been studied. Counting in
+                    # the worker keeps the two findCards queries off the UI thread.
+                    try:
+                        question['_book_progress'] = book_progress(self.api, cfg)
+                    except Exception as error:
+                        self.log('book progress unavailable: %s' % type(error).__name__)
                     if plan is None and (cfg.get('review_plan_mode') == 'daily' or cfg.get('review_deadline') or cfg.get('review_daily_goal')):
                         try:
                             plan = collection_plan(self.api, cfg)
                         except Exception as error:
                             self.log('review plan refresh failed: %s' % type(error).__name__)
                     question['_today_remaining'] = today_remaining(plan) if plan else None
-                self.signals.prepared.emit(question, None, generation, manual)
+                elif manual:
+                    reason = self._no_card_reason(cfg, plan, due_only)
+                self.signals.prepared.emit(question, reason, generation, manual)
             except Exception as error:
                 self.log('review preparation failed: %s' % type(error).__name__)
                 self.signals.prepared.emit(None, str(error), generation, manual)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _no_card_reason(self, cfg, plan, due_only):
+        """Name the real reason the manual button found nothing.
+
+        The plan's batch is the deadline pace, not what Anki will release: a deck's
+        daily new limit can be spent while thousands of new words remain in the book.
+        Saying that plainly is more useful than a toast that fits every cause.
+        """
+        try:
+            new_now, due_now = book_availability(self.api, cfg)
+        except Exception as error:
+            self.log('book availability check failed: %s' % type(error).__name__)
+            return None
+        name = book_label(cfg) or '这本词书'
+        if due_only:
+            if due_now:
+                return ('「%s」还有 %d 张到期卡，但当前题型凑不出题目；到设置里多勾一种题型试试。' % (name, due_now))
+            return '「%s」现在没有到期复习卡。' % name
+        if not new_now and not due_now:
+            remaining = int((plan or {}).get('remaining_new_total', 0))
+            left = '（书里还剩 %d 张新词）' % remaining if remaining else ''
+            return ('「%s」今天没有可学的卡：Anki 的每日新词额度已用完%s，也没有到期复习。'
+                    '明天再来，或在 Anki 牌组选项里把新词上限调高。' % (name, left))
+        return ('「%s」还有 %d 张新词、%d 张到期卡，但当前题型凑不出题目；到设置里多勾一种题型试试。'
+                % (name, new_now, due_now))
 
     def _prepared(self, question, error, generation, manual, previous=None):
         if generation != self.generation:
@@ -1208,7 +2200,12 @@ class DesktopReviewController:
             return
         if error or not question:
             if manual:
-                self.feedback('复习暂不可用：%s' % error if error else '没有符合已选题型的可复习词，或今天的学习额度已用完。')
+                message = str(error) if error else ''
+                if message.startswith('「'):
+                    self.feedback(message)
+                else:
+                    self.feedback('复习暂不可用：%s' % message if message else
+                                  '没有符合已选题型的可复习词，或今天的学习额度已用完。')
             if previous is None:
                 self.schedule(reset=bool(error) or not self.regular_deadline or time.monotonic() >= self.regular_deadline)
             return
@@ -1220,6 +2217,7 @@ class DesktopReviewController:
         connected = False
         try:
             cfg = self.settings()
+            cfg['_book_progress'] = question.get('_book_progress') or (0, 0)
             progress = '%d / %d' % (len(self.session_seen) + 1, self.session_target)
             self.dialog = ReviewDialog(question, cfg.get('review_position', 'corner'), self._grade, cfg, progress, self.open_settings, self.open_word_lookup, self._lookup_example)
             new_dialog = self.dialog
@@ -1231,12 +2229,16 @@ class DesktopReviewController:
                 self.dialog.setParent(host, Qt.WindowType.Widget)
                 self.dialog.setGeometry(host.rect())
             self.dialog.finished.connect(self._closed)
+            self.dialog.mastered.connect(self._master_card)
+            self.dialog.review_requested.connect(lambda _dialog=None: self.review_previous())
+            self.dialog.review_back_requested.connect(lambda _dialog=None: self.review_back())
             connected = True
             self.dialog.show()
             self.dialog.raise_()
             if previous is None:
                 self.review_host = self.dialog
             self.log('review popup displayed')
+            self._start_prefetch(self.dialog)
             self._lookup_known_words(self.dialog, cfg)
             self._lookup_relations(self.dialog, dict(cfg))
             if previous is not None:
@@ -1382,7 +2384,54 @@ class DesktopReviewController:
             dialog.example_hint_button.setEnabled(True)
             dialog.status.setText('例句查询失败，请稍后重试。' if error else '没有找到包含该词的例句。')
 
+    def _master_card(self, dialog):
+        """Stop studying this word: suspend the card, tag the note, write no rating.
+
+        The user's own judgement that a word is already known is not a review result,
+        so it must not touch Anki's scheduling. Suspending is reversible and every
+        card query here already honours it; the tag keeps the decision recoverable.
+        """
+        question = dict(dialog.question)
+        # A mastered card is done from the user's point of view, so it belongs in the
+        # look-back too — named for what it was, not as a rating Anki never received.
+        self.remember(dialog, 0, rating='Mastered')
+        cfg = dict(self.settings())
+        cfg['_review_exclude_card'] = self._current_reviewer_card()
+        dialog.mastered_button.setEnabled(False)
+
+        def work():
+            error = None
+            note_id = None
+            try:
+                note_id = mark_mastered(self.api, cfg, question)
+            except Exception as raised:
+                error = str(raised) or type(raised).__name__
+                self.log('mark mastered failed: %s' % type(raised).__name__)
+            self.signals.mastered_done.emit(dialog, str(question.get('word', '')), note_id, error)
+
+        # Anki's answer and tag calls go on a thread: doing them in the click handler
+        # froze the window, because the UI thread was waiting on a request that Anki
+        # itself could only serve once the UI thread came back.
+        threading.Thread(target=work, daemon=True).start()
+
+    def _mastered(self, dialog, word, note_id, error):
+        if error:
+            self.feedback('「%s」没能标记为已掌握：%s' % (word, error))
+            if self.dialog is dialog:
+                dialog.mastered_button.setEnabled(True)
+            return
+        self.log('card marked mastered: %s cid=%s nid=%s' % (word, dialog.question['card_id'], note_id))
+        self.feedback('「%s」已标记为已掌握，不会再出现。要恢复就在 Anki 浏览器搜 tag:%s，取消挂起即可。' %
+                      (word, MASTERED_TAG))
+        if self.dialog is not dialog:
+            return
+        # No rating is written, so no daily slot is spent: advance exactly the way a
+        # rating does, which paints the next card into this window instead of closing
+        # it and opening another one a second later.
+        self._advance(dialog, inflight=False)
+
     def _closed(self, _result):
+        stop_speech()
         dialog = self.dialog
         self.dialog = None
         host, self.review_host = self.review_host, None
@@ -1406,6 +2455,23 @@ class DesktopReviewController:
                 self.log('study dashboard refresh failed: %s' % type(error).__name__)
         self.schedule(reset=True)
 
+    def card_on_screen(self):
+        """Whether a study window is really up, rather than merely still referenced.
+
+        The close filter hides Anki's main window while a card is on screen, so a stale
+        reference must not answer for one: it was seen leaving an Anki with no window at
+        all, which nothing on screen can close any more.
+        """
+        for widget in (self.dialog, self.review_host, self.break_dialog):
+            if widget is None:
+                continue
+            try:
+                if widget.isVisible():
+                    return True
+            except RuntimeError:
+                continue        # the Qt object is already gone; only the reference remains
+        return False
+
     def _host_closed(self, _result):
         dialog = self.dialog
         self.review_host = None
@@ -1421,10 +2487,101 @@ class DesktopReviewController:
         if dialog.completed:
             self.recent_words[word] = time.monotonic()
 
+    def remember(self, dialog, ease, rating=None):
+        """Keep an answered card so 回看上一张 can show it again.
+
+        Only what the card asked and what the user made of it — nothing here lets a
+        look-back reach the scheduler, and the list is capped so a long session cannot grow.
+        """
+        self.history.append({'question': dict(dialog.question), 'ease': int(ease),
+                             'rating': rating or EASE_NAMES.get(int(ease), str(ease)),
+                             'correct': getattr(dialog, 'last_correct', True),
+                             'hint_uses': getattr(dialog, 'hint_uses', 0),
+                             'incorrect_letters': getattr(dialog, 'incorrect_letters', 0),
+                             'failed_attempts': getattr(dialog, 'failed_attempts', 0),
+                             'hint_record': dict(getattr(dialog, 'hint_record', None) or {}),
+                             'seconds': getattr(dialog, 'answer_seconds', None)})
+        del self.history[:-self.HISTORY_LIMIT]
+
+    def review_previous(self):
+        """Step back over the cards already answered, without losing this one."""
+        if self.busy or not self.history:
+            return False
+        if self.review_index is None:
+            if self.dialog is None:
+                return False
+            self.paused = self.dialog
+            self.review_index = len(self.history) + 1
+        return self.show_review(min(self.review_index - 1, len(self.history)))
+
+    def review_back(self):
+        if self.review_index is None or self.review_index <= 1:
+            return False
+        return self.show_review(self.review_index - 1)
+
+    def show_review(self, index):
+        if index < 1 or index > len(self.history):
+            return False
+        entry = self.history[index - 1]
+        self.review_index = index
+        outgoing = self.dialog
+        cfg = dict(self.settings())
+        dialog = ReviewDialog(entry['question'], cfg.get('review_position', 'corner'),
+                              lambda *_a: None, cfg, '回看 %d / %d' % (index, len(self.history)),
+                              self.open_settings, self.open_word_lookup, self._lookup_example)
+        dialog.review_note = entry
+        dialog.review_requested.connect(lambda _d=None: self.exit_review())
+        dialog.review_back_requested.connect(lambda _d=None: self.review_back())
+        dialog.finished.connect(self._review_closed)
+        if outgoing is not None:
+            dialog.setGeometry(outgoing.geometry())
+            outgoing.hide()
+            if getattr(outgoing, 'review_note', None) is not None:
+                # Walking further back closes the look-back we came from; the disconnect
+                # first, or its `finished` would end the whole review.
+                try:
+                    outgoing.finished.disconnect(self._review_closed)
+                except Exception:
+                    pass
+                outgoing.close()
+        self.dialog = dialog
+        dialog.show()
+        dialog.enter_review()
+        dialog.raise_()
+        self.log('review look-back opened: card %s (%d/%d)' % (
+            entry['question']['card_id'], index, len(self.history)))
+        return True
+
+    def exit_review(self):
+        if self.review_index is None:
+            return False
+        looking = self.dialog
+        self.review_index = None
+        self.dialog = self.paused
+        self.paused = None
+        if looking is not None:
+            try:
+                looking.finished.disconnect(self._review_closed)
+            except Exception:
+                pass
+            looking.close()
+        if self.dialog is not None:
+            self.dialog.show()
+            self.dialog.raise_()
+        self.log('review look-back closed')
+        return True
+
+    def _review_closed(self, _result):
+        self.exit_review()
+
     def _grade(self, dialog, ease):
         if mw.col is None or mw.state == 'review':
             dialog.grade_result('Anki 正在复习或账户已关闭')
             return
+        # Kept for 回看上一张 the moment the decision is made; a save that later fails drops
+        # the entry again in `_saved`, so a look-back never shows a card Anki never saw.
+        dialog.recorded_ease = ease
+        self.remember(dialog, ease)
         collection = mw.col
         cfg = dict(self.settings())
         cfg['_capture_lookup_cache'] = self.capture_lookup_cache
@@ -1432,59 +2589,75 @@ class DesktopReviewController:
         cfg['_review_exclude_cards'] = self.session_seen | {dialog.question['card_id']}
         cfg['_review_exclude_words'] = self.session_words | {dialog.question['word'].casefold()}
         cfg['_review_recent_words'] = set(self.recent_words)
+        # The next card is chosen while this rating is still being written, so the
+        # deck must be treated as one slot poorer in the queue this card came from.
+        inflight_new = dialog.question.get('kind') == 'new'
+        cfg['_review_inflight_new'] = 1 if inflight_new else 0
+        cfg['_review_inflight_due'] = 0 if inflight_new else 1
         completed = len(self.session_seen) + 1
         current_target = self.session_target
         generation = self.generation
 
-        def work():
+        def save():
+            """Write the rating on its own thread; the answer is already given."""
+            error = None
             try:
-                target = current_target
-                current_plan = None
                 submit_review(self.api, cfg, dialog.question, ease,
-                              lambda question, rating: self._answer_on_main(dialog, collection, generation, question, rating))
-                next_result = None
-                if cfg.get('review_plan_mode') == 'daily':
-                    try:
-                        current_plan = collection_plan(self.api, cfg)
-                        target = updated_session_target(completed, current_plan)
-                    except Exception as error:
-                        self.log('review plan refresh failed: %s' % type(error).__name__)
-                elif cfg.get('review_deadline') or cfg.get('review_daily_goal'):
-                    try:
-                        current_plan = collection_plan(self.api, cfg)
-                    except Exception as error:
-                        self.log('review plan refresh failed: %s' % type(error).__name__)
-                new_group = completed >= target
-                if new_group:
-                    target = session_batch_size(cfg, current_plan, manual=True)
-                self.signals.saved.emit(dialog, generation)
-                limits_new = plan_limits_new(cfg)
-                try:
-                    next_question = prepare_question(self.api, cfg, cfg.get('review_mode', 'mixed'),
-                                                     due_only=bool(limits_new and current_plan is not None and
-                                                                   current_plan['new_remaining'] <= 0))
-                    if next_question:
-                        next_question['_today_remaining'] = today_remaining(current_plan) if current_plan else None
-                        next_question['_new_group'] = new_group
-                    next_result = (next_question, None, target, new_group,
-                                   None if next_question else end_of_session_reason(current_plan, limits_new))
-                except Exception as error:
-                    self.log('review preparation failed: %s' % type(error).__name__)
-                    next_result = (None, str(error), target, False, None)
-                self.signals.graded.emit(dialog, None, generation, next_result)
-            except Exception as error:
-                self.log('review grading failed: %s' % type(error).__name__)
-                self.signals.graded.emit(dialog, str(error), generation, None)
+                              lambda question, rating: self._answer_on_main(collection, generation, question, rating))
+                self.log('review rating saved')
+            except Exception as raised:
+                error = str(raised) or type(raised).__name__
+                self.log('review save failed: %s' % type(raised).__name__)
+            self.signals.saved.emit(dialog, generation, error)
 
-        threading.Thread(target=work, daemon=True).start()
+        threading.Thread(target=save, daemon=True).start()
+        threading.Thread(target=self._flip(dialog, cfg, completed, current_target, generation),
+                         daemon=True).start()
 
-    def _answer_on_main(self, dialog, collection, generation, question, ease):
+    def _flip(self, dialog, cfg, completed, current_target, generation):
+        """The thread body that moves on to the next card, prefetched if one is ready.
+
+        Ratings and 已掌握 share this, so both hand the next card over inside the same
+        window instead of closing it and opening another one a second later.
+        """
+        def run():
+            key = (generation, frozenset(cfg['_review_exclude_cards']), current_target)
+            ready = self.prefetch_ready
+            if self.prefetched is None and ready is not None:
+                # A prefetch that is still running is far cheaper than starting a
+                # second round trip, so give it a moment before falling back.
+                ready.wait(0.4)
+            prefetched, self.prefetched = self.prefetched, None
+            self.prefetch_ready = None
+            result = (prefetched[1] if prefetched is not None and prefetched[0] == key
+                      else self._next_result(cfg, completed, current_target))
+            self.signals.graded.emit(dialog, None, generation, result)
+        return run
+
+    def _advance(self, dialog, inflight):
+        """Move on to the next card without writing a rating (used by 已掌握)."""
+        cfg = dict(self.settings())
+        cfg['_capture_lookup_cache'] = self.capture_lookup_cache
+        cfg['_review_exclude_card'] = self._current_reviewer_card()
+        cfg['_review_exclude_cards'] = self.session_seen | {dialog.question['card_id']}
+        cfg['_review_exclude_words'] = self.session_words | {str(dialog.question.get('word', '')).casefold()}
+        cfg['_review_recent_words'] = set(self.recent_words)
+        cfg['_review_inflight_new'] = 1 if inflight and dialog.question.get('kind') == 'new' else 0
+        cfg['_review_inflight_due'] = 1 if inflight and dialog.question.get('kind') != 'new' else 0
+        threading.Thread(target=self._flip(dialog, cfg, len(self.session_seen) + 1,
+                                          self.session_target, self.generation), daemon=True).start()
+
+    def _answer_on_main(self, collection, generation, question, ease):
         done = threading.Event()
         cancelled = threading.Event()
         result = {}
         def answer():
             try:
-                if cancelled.is_set() or generation != self.generation or self.dialog is not dialog or mw.col is not collection or mw.state == 'review':
+                # The card may already have been replaced on screen: the rating was
+                # given, so it still has to be written. What must not happen is
+                # answering into a different account or a card that moved, which the
+                # generation, collection and snapshot checks below cover.
+                if cancelled.is_set() or generation != self.generation or mw.col is not collection or mw.state == 'review':
                     raise ValueError('Anki 账户或复习状态已改变')
                 card = collection.get_card(question['card_id'])
                 if any(getattr(card, key) != value for key, value in question['snapshot'].items()):
@@ -1519,14 +2692,19 @@ class DesktopReviewController:
             raise result['error']
         return result['value']
 
-    def _saved(self, dialog, generation):
-        if generation == self.generation and self.dialog is dialog:
-            dialog.status.setText('复习结果已保存，正在准备下一张…')
+    def _saved(self, dialog, generation, error):
+        """Silence on success; only a lost rating is news, because the card moved on."""
+        if generation != self.generation or not error:
+            return
+        # A rating that never reached Anki must not be offered as a look-back either.
+        self.history = [entry for entry in self.history
+                        if entry['question']['card_id'] != dialog.question['card_id']]
+        self.feedback('「%s」的评分没有保存：%s。卡片已经翻过去了，Anki 里还没有这条记录。' %
+                      (dialog.question.get('word', ''), error))
 
     def _graded(self, dialog, error, generation, next_result):
         if generation == self.generation and self.dialog is dialog:
             if not error:
-                self.log('review rating saved')
                 end_reason = None
                 if next_result and len(next_result) > 2:
                     self.session_target = next_result[2] if next_result[0] else len(self.session_seen) + 1
@@ -1539,22 +2717,77 @@ class DesktopReviewController:
                     dialog.completed = True
                     self._record_review(dialog)
                     if new_group:
-                        self.session_seen.clear()
-                        self.session_words.clear()
-                    if self._prepared(next_result[0], None, generation, False, previous=dialog):
-                        dialog.finished.disconnect(self._closed)
-                        dialog.input_mode.restore()
-                        if dialog is self.review_host:
-                            dialog.finished.connect(self._host_closed)
-                        else:
-                            dialog.accept()
+                        self.pending_group = (dialog, next_result[0], generation)
+                        self._show_group_break(dialog)
+                        return
+                    if self._handover(dialog, next_result[0], generation):
                         return
                 self.prepared_next = next_result
                 if next_result and next_result[1]:
-                    self.feedback('复习结果已保存，但下一张准备失败。')
+                    self.feedback('下一张没能准备好：%s。这张的评分不受影响。' % next_result[1])
                 elif not next_result and end_reason:
                     self.feedback(end_reason)
             dialog.grade_result(error)
+
+    def _handover(self, dialog, question, generation):
+        """Paint the next card over the window the last one is still using."""
+        if not self._prepared(question, None, generation, False, previous=dialog):
+            return False
+        dialog.finished.disconnect(self._closed)
+        dialog.input_mode.restore()
+        if dialog is self.review_host:
+            dialog.finished.connect(self._host_closed)
+        else:
+            dialog.accept()
+        return True
+
+    def _show_group_break(self, dialog):
+        summary = '本组 %d 张已完成 · 下一组约 %d 张' % (len(self.session_seen), self.session_target)
+        # The countdown covers the card the next group is about to replace, in the same
+        # window: one popup for the whole session instead of a second one next to it.
+        host = dialog.window()
+        # The panel covers the card, but the letter boxes underneath are still live, and a
+        # QLineEdit eats Enter — which made "按 Enter 进入下一组" a promise the window did
+        # not keep when the learner's cursor was still in the last box they typed into.
+        for box in list(getattr(dialog, 'letter_boxes', None) or ()):
+            box.setEnabled(False)
+        focused = host.focusWidget()
+        if focused is not None:
+            focused.clearFocus()
+        break_dialog = GroupBreakDialog(summary, self.settings(), parent=host)
+        self.break_dialog = break_dialog
+        break_dialog.finished.connect(self._break_finished)
+        break_dialog.setGeometry(host.rect())
+        break_dialog.show()
+        break_dialog.raise_()
+        self.log('group break offered: %s' % summary)
+
+    def _break_finished(self, result):
+        pending, self.pending_group = self.pending_group, None
+        panel, self.break_dialog = self.break_dialog, None
+        if panel is not None:
+            panel.timer.stop()
+            panel.hide()
+        if pending is None:
+            return
+        dialog, question, generation = pending
+        if result != int(QDialog.DialogCode.Accepted):
+            self.end_session(dialog)
+            return
+        self.session_seen.clear()
+        self.session_words.clear()
+        if not self._handover(dialog, question, generation):
+            self.prepared_next = (question, None)
+
+    def end_session(self, dialog=None):
+        """Stop here: the group is finished and the user did not ask for another."""
+        self.session_target = len(self.session_seen)
+        self.prepared_next = None
+        self.prefetched = None
+        self.prefetch_ready = None
+        current = dialog if dialog is not None else self.dialog
+        if current is not None:
+            current.reject()
 
     def style_card(self, text, card, kind):
         try:
@@ -1571,11 +2804,18 @@ class DesktopReviewController:
         self.timer.stop()
         self.regular_deadline = None
         self.prepared_next = None
+        self.prefetched = None
+        self.prefetch_ready = None
         self.busy = False
         self.session_seen.clear()
         self.session_words.clear()
         self.recent_words.clear()
         dialog = None
+        if self.break_dialog is not None:
+            break_dialog, self.break_dialog = self.break_dialog, None
+            break_dialog.finished.disconnect(self._break_finished)
+            break_dialog.reject()
+        self.pending_group = None
         if self.dialog:
             dialog, self.dialog = self.dialog, None
             dialog.finished.disconnect(self._closed)

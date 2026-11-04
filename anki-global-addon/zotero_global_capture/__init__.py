@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import datetime
 import html
 import json
 import os
@@ -24,12 +25,14 @@ from aqt.qt import (
 
 from .background import configure_login_start
 from .review_popup import DesktopReviewController, enable_click_away, popup_style
-from .review_logic import (BOOK_MIGRATION, book_clause, book_label, book_progress, collection_plan,
-                           resolve_book_decks, study_book, study_book_id, study_books, selected_review_modes,
+from .review_logic import (BOOK_MIGRATION, apply_auto_sync_preference, book_clause, book_label, book_progress,
+                           collection_plan, hide_instead_of_quit, background_instead_of_quit, install_sync_error_guard, resolve_book_decks,
+                           study_book, study_book_id, study_books, selected_review_modes, sync_due,
+                           quit_request_path, take_quit_request,
                            validate_windows, window_minutes)
 from .exam_dates import fetch_cet
 from .study_dashboard import activity_counts, dashboard_html
-from . import core_import, cet6_books, cet6_listening
+from . import core_import, cet6_books, cet6_listening, audio_volume, speech
 
 
 ADDON = __name__
@@ -45,6 +48,11 @@ DEFAULTS = {
     "confirm_seconds": 8,
     "review_enabled": True,
     "review_interval_minutes": 30,
+    "review_pin": True,
+    "hide_main_on_close": True,
+    "sync_background": True,
+    "sync_background_minutes": 5,
+    "anki_auto_sync_remembered": None,
     "review_smart": True,
     "review_core_enabled": True,
     "review_book": "",
@@ -66,11 +74,18 @@ DEFAULTS = {
     "review_hint_audio": False,
     "review_auto_example": False,
     "review_auto_example_mode": "first",
+    # Anki's own text-to-speech sits around -21 dBFS, which reads as quiet on a laptop;
+    # 100% means "leave Anki's player exactly as it is", so this is a gain, not a volume
+    # that can only be turned down.
+    "review_volume": audio_volume.DEFAULT,
     "review_known_style": "underline",
     "review_position": "corner",
     "review_theme": "light",
     "review_mode": "mixed",
     "review_beautify": True,
+    # 拼写题的动效档位：full = 字母跳跃 + 庆祝徽章 + 星芒/彩带；calm = 只留跳跃与徽章；
+    # off = 完全不画。默认 full 是用户 2026-11-04 批准样稿时定的。
+    "review_motion": "full",
     "review_start_at_login": False,
 }
 WM_HOTKEY = 0x0312
@@ -519,6 +534,9 @@ class Controller:
         self.busy = False
         self.last_auto = ("", 0)
         self.review = DesktopReviewController(settings, api, show_feedback, log_runtime)
+        self.main_close_filter = None
+        self.sync_timer = None
+        self.quit_timer = None
 
     def on_event(self, kind):
         log_runtime("controller event: %s" % kind)
@@ -840,13 +858,24 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     shortcut.feedback.connect(shortcut_status.setText)
     review_enabled = QCheckBox("定时弹出单词复习")
     review_enabled.setChecked(bool(cfg["review_enabled"]))
+    hide_main = QCheckBox('点主窗口关闭按钮时只隐藏，不退出 Anki')
+    hide_main.setObjectName('hideMainOnClose')
+    hide_main.setChecked(bool(cfg.get('hide_main_on_close', True)))
+    sync_back = QCheckBox('后台静默同步（不再在打开和关闭 Anki 时等待同步）')
+    sync_back.setObjectName('syncBackground')
+    sync_back.setChecked(bool(cfg.get('sync_background', True)))
+    sync_minutes = QSpinBox()
+    sync_minutes.setObjectName('syncBackgroundMinutes')
+    sync_minutes.setRange(1, 120)
+    sync_minutes.setSuffix(" 分钟")
+    sync_minutes.setValue(int(cfg.get('sync_background_minutes', 5) or 5))
     review_interval = QSpinBox()
     review_interval.setRange(5, 240)
     review_interval.setSuffix(" 分钟")
     review_interval.setValue(int(cfg["review_interval_minutes"]))
     review_batch = QSpinBox()
     review_batch.setObjectName('reviewBatch')
-    review_batch.setRange(1, 10)
+    review_batch.setRange(1, 999)
     review_batch.setSuffix(" 张")
     review_batch.setValue(int(cfg["review_batch_size"]))
     plan_mode = QComboBox()
@@ -974,6 +1003,26 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     for label, value in (("第一条例句", "first"), ("不自动朗读", "off"), ("普通例句", "example"), ("权威例句", "authority"), ("所有例句", "all")):
         review_auto_example.addItem(label, value)
     review_auto_example.setCurrentIndex(max(0, review_auto_example.findData(cfg["review_auto_example_mode"])))
+    # Anki has no volume control, so this dial is the plug-in's own gain on the player that
+    # speaks the word. It applies while it is being moved, and 试听 says a word at it, so
+    # the setting can be judged by ear without closing the dialog and restarting Anki.
+    review_volume = QSpinBox()
+    review_volume.setObjectName('reviewVolume')
+    review_volume.setRange(audio_volume.FLOOR, audio_volume.CEILING)
+    review_volume.setSingleStep(10)
+    review_volume.setSuffix(' %')
+    review_volume.setValue(audio_volume.clamp(cfg.get('review_volume', audio_volume.DEFAULT)))
+    volume_preview_button = QPushButton('试听')
+    volume_preview_button.setObjectName('volumePreview')
+    volume_widget = QWidget()
+    volume_row = QHBoxLayout(volume_widget)
+    volume_row.setContentsMargins(0, 0, 0, 0)
+    volume_row.setSpacing(8)
+    volume_row.addWidget(review_volume)
+    volume_row.addWidget(volume_preview_button)
+    volume_row.addStretch(1)
+    review_volume.valueChanged.connect(lambda value: apply_review_volume(int(value)))
+    volume_preview_button.clicked.connect(lambda _checked=False: volume_preview(int(review_volume.value())))
     review_core = QCheckBox("优先学习四六级核心词（到期复习仍优先）")
     review_core.setChecked(bool(cfg.get("review_core_enabled", True)))
     # The book list is the whole scope model now: pick one named book here and every
@@ -1050,6 +1099,9 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     form.addRow(QLabel("点击快捷键输入框后按组合键；自动收词会暂存并恢复剪贴板。"))
     form = section('复习提醒')
     form.addRow("随身复习", review_enabled)
+    form.addRow("关闭主窗口", hide_main)
+    form.addRow("后台同步", sync_back)
+    form.addRow("同步间隔", sync_minutes)
     form.addRow("弹出间隔", review_interval)
     form.addRow("记忆复习", review_smart)
     form.addRow("核心词优先", review_core)
@@ -1091,7 +1143,26 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     form.addRow("自动发音", review_auto_word)
     form.addRow("字母提示发音", review_hint_audio)
     form.addRow("例句发音", review_auto_example)
+    form.addRow("朗读音量", volume_widget)
+    volume_help = QLabel("100% 表示什么都不改。高于 100% 时，插件会用同一套系统语音把单词重新录一遍，"
+                         "并把它推到接近满刻度（不会削波），再交给 Anki 播放——只影响插件朗读的单词和例句，"
+                         "不会改动你自己牌组的音频。拖动即时生效，点「试听」当场听。")
+    volume_help.setWordWrap(True)
+    form.addRow(volume_help)
     form.addRow("卡片外观", review_beautify)
+    motion_row = QWidget()
+    motion_layout = QHBoxLayout(motion_row)
+    motion_layout.setContentsMargins(0, 0, 0, 0)
+    motion_checks = {}
+    for motion_label, motion_value in (("全部动效", "full"), ("只要庆祝", "calm"), ("关闭动效", "off")):
+        motion_checks[motion_value] = QRadioButton(motion_label)
+        motion_layout.addWidget(motion_checks[motion_value])
+    motion_checks.get(cfg.get("review_motion", "full"), motion_checks["full"]).setChecked(True)
+    form.addRow("卡片动效", motion_row)
+    motion_help = QLabel("拼写题一次写对时会有庆祝徽章，字母落格时轻微跳动。"
+                         "「只要庆祝」去掉星芒和彩带，「关闭动效」什么都不画，评分与排程完全不受影响。")
+    motion_help.setWordWrap(True)
+    form.addRow(motion_help)
     buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
     buttons.button(QDialogButtonBox.StandardButton.Save).setObjectName('saveSettings')
     buttons.button(QDialogButtonBox.StandardButton.Save).setText('保存')
@@ -1149,7 +1220,9 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
             plan_summary.setText(days + '今日新学：已学 %d / 目标 %d（剩余 %d）；复习：已复习 %d / 目标 %d（剩余 %d）；每组约 %d 张。'
                                  % (plan['new_done'], plan['new_goal'], plan['new_remaining'], plan['review_done'],
                                     plan['review_goal'], plan['review_remaining'], plan['batch']) +
-                                 (' 当前可用组数不足，尚差约 %d 张的容量；可缩短间隔或增加学习时段。' % plan['capacity_shortfall'] if plan['capacity_shortfall'] else '') +
+                                 (' 今天 Anki 只会给到 %d 张，比目标少 %d 张；要一次学更多得提高牌组的每日新词上限（Anki 牌组选项）。'
+                                  % (int(plan.get('available_new', 0)) + int(plan.get('available_due', 0)),
+                                     plan['capacity_shortfall']) if plan['capacity_shortfall'] else '') +
                                  ' 当前范围剩余新卡 %d 张；仅统计所选笔记类型。按 Anki 学习日统计，复习日期与每日上限由 Anki 控制。' % plan['remaining_new_total'])
         except Exception:
             plan_summary.setText('暂时无法读取牌组计划，请检查牌组。')
@@ -1177,7 +1250,8 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
         daily_goal.setEnabled(auto_plan)
         computer_hours.setEnabled(auto_plan and not windows_enabled.isChecked())
         batch_help.setText('自动计划决定每组张数，固定数量暂不生效；完成目标后手动开始为 1 张。' if auto_plan
-                           else '按固定数量学习；切换为自动计划后，每组数量由每日目标计算。')
+                           else '固定数量不设上限：写多少就一组学多少，学到词书没有了、或今天 Anki 的每日上限用尽才会停。'
+                                '每组结束仍有 3 秒倒计时，随时可以收。')
         confirm_seconds.setEnabled(mode.currentData() == 'preview')
         shortcut.setEnabled(mode.currentData() != 'auto')
         shortcut_status.setText('自动收词无需快捷键；切回快捷键模式后原设置仍保留。' if mode.currentData() == 'auto'
@@ -1223,12 +1297,18 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     finally:
         app.removeEventFilter(guard)
     if result != QDialog.DialogCode.Accepted:
+        # The dial takes effect as it is moved so it can be heard at once; cancelling has to
+        # put back whatever was saved, or closing the dialog would leave Anki playing louder.
+        apply_review_volume(original.get('review_volume'))
         return
     cfg.update({"mode": mode.currentData(), "deck": deck.currentData(), "model": model.currentData(),
                 "front_field": front.currentData(), "back_field": back.currentData(),
                 "modifiers": shortcut.modifiers, "virtual_key": shortcut.virtual_key,
                 "confirm_seconds": int(confirm_seconds.currentData()),
                 "review_enabled": review_enabled.isChecked(),
+                "hide_main_on_close": hide_main.isChecked(),
+                "sync_background": sync_back.isChecked(),
+                "sync_background_minutes": sync_minutes.value(),
                 "review_interval_minutes": review_interval.value(),
                 "review_batch_size": review_batch.value(),
                 "review_plan_mode": plan_mode.currentData(),
@@ -1241,6 +1321,7 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
                 "review_auto_word": review_auto_word.isChecked(),
                 "review_hint_audio": review_hint_audio.isChecked(),
                 "review_auto_example_mode": review_auto_example.currentData(),
+                "review_volume": review_volume.value(),
                 "review_smart": review_smart.isChecked(),
                 "review_core_enabled": review_core.isChecked(),
                 "study_book": book_value(),
@@ -1249,6 +1330,8 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
                 "review_modes": review_modes_value(),
                 "review_known_style": known_style.currentData(),
                 "review_beautify": review_beautify.isChecked(),
+                "review_motion": next((value for value, check in motion_checks.items()
+                                       if check.isChecked()), "full"),
                 "review_start_at_login": review_start_at_login.isChecked()})
     listener_changed = any(cfg[key] != original[key] for key in ('mode', 'modifiers', 'virtual_key'))
     if listener_changed:
@@ -1288,6 +1371,8 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
             controller.listener.ready.wait(2)
         show_feedback('设置保存失败：%s；请检查后重试。' % error, period=10000)
         return
+    refresh_toolbar()
+    apply_sync_preference()
     if not controller.review.dialog:
         controller.review.start()
     if startup_error:
@@ -1299,28 +1384,32 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
 
 
 def menu_action():
+    """Two entries in Anki's Tools menu, not eleven.
+
+    The plug-in had grown to eleven top-level items, and the three things used every day
+    were buried under seven word-list maintenance actions nobody runs twice. The daily three
+    go into one submenu, the maintenance seven one level further down, and the settings entry
+    stays where people look for it. Nothing here is dropped — only moved.
+    """
     action = mw.form.menuTools.addAction("全局划词入 Anki 设置…")
     action.triggered.connect(open_settings)
-    review_action = mw.form.menuTools.addAction("单词随身复习：立即弹出一张")
+    review_menu = mw.form.menuTools.addMenu("单词随身复习")
+    review_action = review_menu.addAction("立即弹出一张")
     review_action.triggered.connect(lambda: controller.review.show_next(True))
-    study_book_menu(mw.form.menuTools)
-    core_action = mw.form.menuTools.addAction("四六级核心词：补充缺失词汇")
-    core_action.triggered.connect(import_core_words)
-    browse_action = mw.form.menuTools.addAction("四六级核心词：查看词表")
-    browse_action.triggered.connect(browse_core_words)
-    setup_books = mw.form.menuTools.addAction("六级词书：建立核心与完整词书")
-    setup_books.triggered.connect(setup_cet6_books)
-    core_book = mw.form.menuTools.addAction("六级词书：浏览核心词汇")
-    core_book.triggered.connect(lambda: browse_cet6_book('cet6_core'))
-    full_book = mw.form.menuTools.addAction("六级词书：浏览完整词汇")
-    full_book.triggered.connect(lambda: browse_cet6_book('cet6_full'))
-    cet4_kyle = mw.form.menuTools.addAction("四级词书（KyleBing）：查看词汇")
-    cet4_kyle.triggered.connect(lambda: browse_cet6_book('cet4_kyle'))
-    cet6_kyle = mw.form.menuTools.addAction("六级词书（KyleBing）：查看词汇")
-    cet6_kyle.triggered.connect(lambda: browse_cet6_book('cet6_kyle'))
-    listening = mw.form.menuTools.addAction("六级听力：本地真题与模拟")
+    study_book_menu(review_menu)
+    listening = review_menu.addAction("六级听力：本地真题与模拟")
     listening.triggered.connect(open_cet6_listening)
-    return action, review_action
+    review_menu.addSeparator()
+    manage = review_menu.addMenu("词书与词表管理")
+    for label, handler in (("四六级核心词：补充缺失词汇", import_core_words),
+                           ("四六级核心词：查看词表", browse_core_words),
+                           ("六级词书：建立核心与完整词书", setup_cet6_books),
+                           ("六级词书：浏览核心词汇", lambda: browse_cet6_book('cet6_core')),
+                           ("六级词书：浏览完整词汇", lambda: browse_cet6_book('cet6_full')),
+                           ("四级词书（KyleBing）：查看词汇", lambda: browse_cet6_book('cet4_kyle')),
+                           ("六级词书（KyleBing）：查看词汇", lambda: browse_cet6_book('cet6_kyle'))):
+        manage.addAction(label).triggered.connect(handler)
+    return action, review_menu
 
 
 def import_core_words():
@@ -1403,6 +1492,14 @@ def add_review_to_toolbar(links, toolbar):
         tip='立即弹出「%s」的学习卡；换词书在 工具 → 切换词书' % name, id='zvr-desktop-review'))
 
 
+def refresh_toolbar():
+    """Rebuild the toolbar after the book changes so its name is not stale until restart."""
+    try:
+        mw.toolbar.draw()
+    except Exception as error:
+        log_runtime('toolbar refresh failed: %s' % type(error).__name__)
+
+
 def choose_study_book(book_id, start=True):
     cfg = settings()
     if mw.col is None or book_id not in {book['id'] for book in study_books(cfg)}:
@@ -1418,6 +1515,7 @@ def choose_study_book(book_id, start=True):
     except Exception as error:
         show_feedback('切换词书失败：%s' % error)
         return
+    refresh_toolbar()
     if start:
         controller.review.show_next(True)
 
@@ -1461,6 +1559,11 @@ def add_study_dashboard(_browser, content):
         from aqt.theme import theme_manager
         today = datetime.date.today()
         plan = collection_plan(collection_api, cfg)
+        try:
+            plan['book_learned'], plan['book_total'] = book_progress(collection_api, cfg)
+        except Exception as error:
+            plan['book_learned'] = plan['book_total'] = 0
+            log_runtime('book totals unavailable: %s' % type(error).__name__)
         selected = set()
         escape = lambda value: str(value).replace('\\', '\\\\').replace('"', '\\"')
         base = 'note:"%s"%s -is:suspended -is:buried' % (escape(cfg['model']), book_clause(study_book(cfg)))
@@ -1510,9 +1613,333 @@ def ensure_anki_connect():
     threading.Thread(target=check, daemon=True).start()
 
 
+def abort_media_sync():
+    """Let a shutdown finish: Anki waits for a media sync to end before it exits.
+
+    Three restarts today hung exactly there — the event loop kept answering while the
+    window refused to go away, because the media syncer was still syncing against a proxy
+    that no longer reaches AnkiWeb. Aborting the sync is what Anki's own abort button does,
+    and it lets the normal shutdown (and its exit backup) complete.
+    """
+    try:
+        syncer = mw.media_syncer
+        if syncer is not None and syncer.is_syncing():
+            syncer.abort()
+            log_runtime("media sync aborted so Anki could finish closing")
+    except Exception as error:
+        log_runtime("media sync abort failed: %s" % type(error).__name__)
+
+
+def watch_shutdown():
+    """Mark how far Anki's own shutdown gets.
+
+    Four restarts today had to be finished with a kill: the close event reached Anki, the
+    log said `-> quit`, and the window still never went away — with the media syncer idle,
+    so it was not that. Anki waits for a running backup inside `cleanupAndExit`, and every
+    add-on gets `profile_will_close` first, so this records which side of that we reach.
+    """
+    try:
+        gui_hooks.profile_will_close.append(
+            lambda: log_runtime("anki is closing the profile (profile_will_close)"))
+        log_runtime("shutdown watch installed")
+    except Exception as error:
+        log_runtime("shutdown watch unavailable: %s" % type(error).__name__)
+
+
+class MainWindowCloseFilter(QObject):
+    """Let the user close Anki's window while a card is up, without killing the card.
+
+    Anki quits when its main window closes, which takes the study popup with it. With a
+    card on screen the close button hides the window instead; with none it still quits
+    normally, so Anki never turns into a process the user cannot close.
+    """
+
+    def eventFilter(self, watched, event):
+        try:
+            if event.type() != QEvent.Type.Close:
+                return False
+            forcing = bool(getattr(mw, "zvr_force_quit", False))
+            tray = hasattr(mw, "closeEventFromAction")
+            card_open = controller.review.card_on_screen()
+            hiding = hide_instead_of_quit(
+                card_open, bool(settings().get("hide_main_on_close", True)), forcing)
+            if not hiding and background_instead_of_quit(tray, forcing):
+                # The user runs a tray add-on: with no card on screen this close is "go to
+                # background", not a shutdown. Hand it to that add-on and keep the popup and
+                # sync timers running — stopping them here is what left Anki sitting in the
+                # tray for an hour without ever showing a card (2026-11-04). With a card up,
+                # the branch below still keeps that card visible instead of hiding it too.
+                log_runtime("main window close: tray=on forcing=%s -> background (timers kept)" %
+                            ("yes" if forcing else "no"))
+                return False
+            # Two restarts today needed a forced kill, and the log could not say why the
+            # polite close was refused. Record the inputs to that decision.
+            log_runtime("main window close: card=%s setting=%s forcing=%s tray=%s -> %s" % (
+                card_open, settings().get("hide_main_on_close", True),
+                forcing, "yes" if tray else "no", "hide" if hiding else "quit"))
+            if not hiding:
+                # A real close: stop both timers first. Otherwise the scheduled popup
+                # can open a window in the middle of shutdown, or the background sync
+                # can restart it, and Anki then never finishes quitting — this was seen
+                # leaving a running Anki with no windows at all.
+                mw.zvr_closing = True
+                controller.review.stop()
+                if controller.sync_timer is not None:
+                    controller.sync_timer.stop()
+                abort_media_sync()
+            if hiding:
+                event.ignore()
+                mw.hide()
+                show_feedback('已隐藏 Anki 主窗口，随身复习卡继续。要真正退出，点卡片右上角「…」里的「退出 Anki」。', period=8000)
+                return True
+        except Exception as error:
+            log_runtime("main window close filter failed: %s" % type(error).__name__)
+        return False
+
+
+sync_state = {"last": None, "running": False, "guard": None, "error": None}
+
+
+def aqt_sync_module():
+    """Anki installs its modal sync-error box in aqt.sync, which is what we have to swap."""
+    try:
+        import aqt.sync
+        return aqt.sync
+    except Exception as error:
+        log_runtime("sync module unavailable: %s" % type(error).__name__)
+        return None
+
+
+def sync_is_logged_in():
+    """Anki answers a missing login with a modal sync dialog, so ask before triggering one."""
+    try:
+        return bool(mw.pm.sync_auth())
+    except Exception as error:
+        log_runtime("sync login check failed: %s" % type(error).__name__)
+        return False
+
+
+def end_background_sync():
+    """Give Anki back its own error box and let another idle sync be tried."""
+    sync_state["running"] = False
+    restore, sync_state["guard"] = sync_state["guard"], None
+    if restore is not None:
+        restore()
+
+
+def pause_background_sync(reason):
+    """One failure is enough: stop asking and say so without a modal."""
+    end_background_sync()
+    if controller.sync_timer is not None:
+        controller.sync_timer.stop()
+    log_runtime("background sync paused: %s" % reason)
+    show_feedback("后台同步已暂停：" + short_sync_reason(reason) +
+                  "。保存一次设置可以重新开始，也可以直接点 Anki 的同步按钮。", period=9000)
+
+
+def short_sync_reason(reason):
+    reason = re.sub(r"^(RuntimeError|Exception|SyncError|NetworkError):\s*", "", str(reason or "")).strip()
+    return (reason[:90] + "…") if len(reason) > 90 else (reason or "网络错误")
+
+
+def start_sync_timer():
+    """(Re)arm the idle sync timer, unless the feature is off."""
+    if not settings().get("sync_background", True):
+        return
+    if controller.sync_timer is None:
+        controller.sync_timer = QTimer()
+        controller.sync_timer.timeout.connect(run_background_sync)
+    sync_state["last"] = None
+    controller.sync_timer.start(60000)
+
+
+def quit_request_file():
+    """The note a restart tool leaves when it needs Anki to really exit."""
+    return quit_request_path(os.environ.get("TEMP") or os.path.expanduser("~"))
+
+
+def poll_quit_request():
+    """Answer a quit request with the tray add-on's own exit protocol.
+
+    The user keeps Anki in 'Minimize to Tray 2', so every window close — WM_CLOSE,
+    AnkiConnect's guiExitAnki, even our own exit — is only a hide unless
+    `closeEventFromAction` is set first. That flag lives on mw, so this add-on is the only
+    thing on the machine that can ask for a real quit; a tool that cannot reach it has to
+    escalate to a kill and skip Anki's exit backup.
+    """
+    if not take_quit_request(quit_request_file()):
+        return
+    log_runtime("quit request seen: exiting Anki through the tray protocol")
+    mw.zvr_force_quit = True
+    if hasattr(mw, "closeEventFromAction"):
+        mw.closeEventFromAction = True
+    mw.close()
+
+
+def start_quit_request_timer():
+    """Listen for restart-tool quit requests. One os.path.exists every five seconds."""
+    if controller.quit_timer is None:
+        controller.quit_timer = QTimer()
+        controller.quit_timer.timeout.connect(poll_quit_request)
+    controller.quit_timer.start(5000)
+
+
+def apply_sync_preference():
+    """Move Anki's sync off the open/close path and onto the idle timer."""
+    cfg = settings()
+    remembered = apply_auto_sync_preference(mw.pm.profile, bool(cfg.get("sync_background", True)),
+                                            cfg.get("anki_auto_sync_remembered"))
+    if remembered != cfg.get("anki_auto_sync_remembered"):
+        merged = dict(cfg)
+        merged["anki_auto_sync_remembered"] = remembered
+        try:
+            save_settings(merged)
+        except Exception as error:
+            log_runtime("sync preference not recorded: %s" % type(error).__name__)
+    if cfg.get("sync_background", True):
+        start_sync_timer()
+    elif controller.sync_timer is not None:
+        controller.sync_timer.stop()
+
+
+volume_control = audio_volume.VolumeControl()
+# Which player Anki would answer a word with, and therefore which stage owns its loudness.
+# Filled by `log_tts_routing` at profile open; until it is known the player keeps the gain.
+speech_routing = {"via_file": False}
+
+
+def apply_review_volume(value=None):
+    """How loud Anki plays, for as long as this add-on is loaded.
+
+    Anki has no volume control of its own and hands every clip to the bundled mpv, so the
+    gain goes onto that process — both the one already running and the argument list it
+    will spawn from next. Nothing is written to disk: at 100% Anki's command line is
+    byte-for-byte what it is, and closing Anki forgets all of it.
+
+    When the word is being rendered by `speech` instead (this machine: SAPI speaks straight
+    to the sound card), the render stage owns the loudness and the player must stay neutral.
+    Both stages at full height is what stacked into the distorted, shouty sound the user
+    rejected — one lever per signal.
+    """
+    if value is None:
+        value = settings().get("review_volume", audio_volume.NEUTRAL)
+    value = audio_volume.clamp(value)
+    player_value = audio_volume.NEUTRAL if speech_routing["via_file"] else value
+    try:
+        from aqt.sound import av_player
+    except Exception as error:
+        log_runtime("review volume %d%% unavailable: %s" % (value, type(error).__name__))
+        return {"spec": None, "touched": [], "errors": [str(error)]}
+    applied = volume_control.set(av_player.players, player_value)
+    log_runtime("review volume %d%% (player %d%%, via-file=%s): spec=%s touched=%s errors=%s live-af=%s" % (
+        value, player_value, speech_routing["via_file"], applied["spec"] or "-",
+        ",".join(applied["touched"]) or "-", "; ".join(applied["errors"]) or "-",
+        "no" if applied["af_failed"] else "yes"))
+    return applied
+
+
+def volume_preview(value):
+    """Set the dialled gain and say one word at it, so the setting can be heard.
+
+    This goes through the same routing as the card: previewing the plain SAPI path would
+    prove nothing about the gain the dial just asked for.
+    """
+    applied = apply_review_volume(value)
+    try:
+        from aqt.sound import av_player
+        speech.speak(av_player, mw.taskman, ['example'], value, tts_tag,
+                     on_error=lambda error: show_feedback('试听失败：%s' % error, period=8000))
+    except Exception as error:
+        log_runtime("volume preview unavailable: %s" % type(error).__name__)
+    return applied
+
+
+def tts_tag(text):
+    from anki.sound import TTSTag
+    return TTSTag(field_text=str(text)[:500], lang='en_US', voices=[], speed=1.0, other_args=[])
+
+
+def log_tts_routing():
+    """Record which player Anki would pick for a word, without playing anything.
+
+    The gain lives on mpv; if Anki answers a TTSTag with SAPI instead, the dial cannot be
+    heard at all, and that distinction is invisible from the outside. Asking
+    `rank_for_tag` for the tag we actually build answers it in one log line — and on this
+    machine it answered `chosen=WindowsTTSPlayer`, which is why the card now renders the
+    word into a wav and lets the file player speak it (see `speech.speak`).
+    """
+    try:
+        from aqt.sound import av_player
+        tag = tts_tag('example')
+        chosen = av_player._best_player_for_tag(tag)
+        direct = speech.speaks_directly(chosen)
+        speech_routing["via_file"] = direct
+        log_runtime("tts routing: %s | chosen=%s | speaks-directly=%s" % (
+            audio_volume.describe_players(av_player.players, tag),
+            type(chosen).__name__ if chosen is not None else "None", direct))
+    except Exception as error:
+        log_runtime("tts routing unavailable: %s: %s" % (type(error).__name__, error))
+
+
+def study_is_idle():
+    review = controller.review
+    if mw.col is None or review.card_on_screen():
+        return False
+    if review.busy or mw.state == "review":
+        return False
+    try:
+        return not mw.media_syncer.is_syncing()
+    except Exception:
+        return not sync_state["running"]
+
+
+def run_background_sync():
+    """Sync in a quiet moment, so opening and closing Anki costs nothing."""
+    if getattr(mw, "zvr_closing", False):
+        return
+    cfg = settings()
+    if not cfg.get("sync_background", True) or sync_state["running"]:
+        return
+    now = datetime.datetime.now()
+    if not sync_due(now, sync_state["last"], cfg.get("sync_background_minutes", 5), study_is_idle()):
+        return
+    if not sync_is_logged_in():
+        log_runtime("background sync waiting for a sync login")
+        return
+    sync_state["last"] = now
+    sync_state["running"] = True
+    sync_state["error"] = None
+    sync_state["guard"] = install_sync_error_guard(aqt_sync_module(), sync_state, pause_background_sync)
+    log_runtime("background sync started")
+    try:
+        # Anki's own sync path, on the main thread: it runs the work in a background task,
+        # refreshes afterwards, and still asks the user if a full sync is really needed.
+        # The only thing changed is where a failure goes — see install_sync_error_guard.
+        mw.on_sync_button_clicked()
+    except Exception as error:
+        log_runtime("background sync failed: %s" % type(error).__name__)
+        pause_background_sync(short_sync_reason("%s: %s" % (type(error).__name__, error)))
+        return
+    # Anki reports no completion we can hook, so hand its error box back shortly after a
+    # sync would normally be over; a finished or failed sync already gave it back earlier.
+    QTimer.singleShot(120000, end_background_sync)
+
+
 def on_main_window_ready():
     mw.toolbar.redraw()
     ensure_anki_connect()
+    controller.main_close_filter = MainWindowCloseFilter(mw)
+    mw.installEventFilter(controller.main_close_filter)
+    watch_shutdown()
+    apply_sync_preference()
+    start_sync_timer()
+    start_quit_request_timer()
+    # A new main window means a new player process, so whatever the last one was told no
+    # longer exists; forgetting it keeps the first change a plain add rather than a removal
+    # against a socket that never had the filter.
+    volume_control.reset()
+    log_tts_routing()
+    apply_review_volume()
     if settings().get("review_start_at_login", False):
         try:
             configure_login_start(True)
@@ -1535,6 +1962,7 @@ try:
     gui_hooks.card_will_show.append(controller.review.style_card)
     gui_hooks.deck_browser_will_render_content.append(add_study_dashboard)
     gui_hooks.profile_did_open.append(controller.review.start)
+    gui_hooks.profile_did_open.append(apply_sync_preference)
     gui_hooks.profile_will_close.append(controller.stop)
     gui_hooks.main_window_did_init.append(on_main_window_ready)
     QTimer.singleShot(1500, lambda: controller.review.start() if mw.col else None)

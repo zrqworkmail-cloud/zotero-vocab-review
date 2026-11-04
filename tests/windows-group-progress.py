@@ -26,23 +26,32 @@ q={'kind':'due','mode':'typing','word':'test','meaning':'测试','example':'','l
 d=ReviewDialog(q,'center',lambda *_:None,{'review_auto_word':False},'2 / 5');d.show();app.processEvents()
 assert any('本组 2 / 5' in x.text() and '今日计划剩余：12' in x.text() for x in d.findChildren(QLabel))
 d.close();app.processEvents()
-# The card header has to name the slice it was drawn from.
-named=ReviewDialog(dict(q),'center',lambda *_:None,{'review_auto_word':False,'review_scope_name':'四级核心'},'1 / 3')
+# The card header has to name the book, its progress and what this card is.
+named=ReviewDialog(dict(q),'center',lambda *_:None,{'review_auto_word':False,'study_book':'cet4_core','_book_progress':(128,439)},'1 / 3')
 named.show();app.processEvents()
 header=next(x for x in named.findChildren(QLabel) if 'VOCABULARY' in x.text())
-assert '四级核心' in header.text() and '到期复习' in header.text(),header.text()
-plain=ReviewDialog(dict(q),'center',lambda *_:None,{'review_auto_word':False,'review_scope_decks':['六级词书'],'review_scope_tags':['zvr_cet4_core']},'1 / 3')
-plain.show();app.processEvents()
-header=next(x for x in plain.findChildren(QLabel) if 'VOCABULARY' in x.text())
-assert '六级词书' in header.text() and 'cet4_core' in header.text() and 'zvr_' not in header.text(),header.text()
+assert header.text()=='VOCABULARY  ·  四级核心  ·  128/439  ·  到期复习',header.text()
+lit=ReviewDialog(dict(q),'center',lambda *_:None,{'review_auto_word':False,'study_book':'literature'},'1 / 3')
+lit.show();app.processEvents()
+header=next(x for x in lit.findChildren(QLabel) if 'VOCABULARY' in x.text())
+assert header.text()=='VOCABULARY  ·  文献单词  ·  到期复习',header.text()
+newness=ReviewDialog(dict(q,kind='new'),'center',lambda *_:None,{'review_auto_word':False,'study_book':'cet6_full','_book_progress':(0,4803)},'1 / 3')
+newness.show();app.processEvents()
+header=next(x for x in newness.findChildren(QLabel) if 'VOCABULARY' in x.text())
+assert header.text()=='VOCABULARY  ·  六级全表  ·  0/4803  ·  新词',header.text()
+legacy=ReviewDialog(dict(q),'center',lambda *_:None,{'review_auto_word':False,'review_book':'cet6_kyle'},'1 / 3')
+legacy.show();app.processEvents()
+header=next(x for x in legacy.findChildren(QLabel) if 'VOCABULARY' in x.text())
+assert header.text()=='VOCABULARY  ·  六级词表（KyleBing）  ·  到期复习',header.text()
 unnamed=ReviewDialog(dict(q),'center',lambda *_:None,{'review_auto_word':False},'1 / 3')
 unnamed.show();app.processEvents()
 header=next(x for x in unnamed.findChildren(QLabel) if 'VOCABULARY' in x.text())
-assert header.text()=='VOCABULARY  ·  到期复习',header.text()
-named.close();plain.close();unnamed.close();app.processEvents()
+assert header.text()=='VOCABULARY  ·  未选词书  ·  到期复习',header.text()
+named.close();lit.close();newness.close();legacy.close();unnamed.close();app.processEvents()
 q['_new_group']=True
 d=ReviewDialog(q,'center',lambda *_:None,{'review_auto_word':False},'1 / 3');d.show();app.processEvents()
-assert any('已自动进入下一组' in label.text() for label in d.findChildren(QLabel))
+assert not any('自动进入下一组' in label.text() for label in d.findChildren(QLabel)), \
+    'the group boundary is a countdown the user answers, not a silent roll-over'
 for theme in ('light','dark'):
  assert 'QPushButton#speaker:hover, QPushButton#speaker:focus' in rp.popup_style({'review_theme':theme})
 QTest.keyClick(d,Qt.Key.Key_Escape);app.processEvents();assert not d.isVisible()
@@ -57,7 +66,7 @@ ctl._grade(dlg,3)
 for _ in range(100):
  app.processEvents();QTest.qWait(5)
  if got:break
-assert got and got[0][0] is None and got[0][1][0]['_new_group'] and got[0][1][2:4]==(2,True),got
+assert got and got[0][0] is None and got[0][1][2:4]==(2,True),got
 # a card was produced, so the "why did the session end" slot must stay empty
 assert len(got[0][1])==5 and got[0][1][4] is None,got
 finished=DesktopReviewController(lambda:{},lambda *_:None,lambda *_:None,lambda *_:None)
@@ -66,4 +75,22 @@ finished.show_next=lambda *a,**kw:events.append('next')
 finished.dialog=types.SimpleNamespace(completed=True,skipped=False,question={'card_id':42,'word':'test'})
 finished._closed(0)
 assert events==['schedule'],events
-print('Qt: automatic next group, banner and Escape passed')
+
+# The worker must compute the book progress and hand it to the preview, not just the
+# name: a book label without 已学/总数 was the state before this check existed.
+prog_cfg={'review_plan_mode':'fixed','review_batch_size':1,'review_auto_word':False,
+          'study_book':'cet4_core','review_theme':'dark','review_known_style':'none'}
+ctl=DesktopReviewController(lambda:dict(prog_cfg),lambda *_:None,lambda *_:None,lambda *_:None)
+ctl.session_target=1;ctl._lookup_relations=lambda *_:None
+rp.prepare_question=lambda *a,**k:dict(q,card_id=44)
+rp.book_progress=lambda api,cfg:(128,439)
+ctl.show_next(True)
+for _ in range(200):
+ app.processEvents();QTest.qWait(5)
+ if ctl.dialog:break
+assert ctl.dialog is not None,'the prepared card must be shown'
+assert ctl.dialog.cfg.get('_book_progress')==(128,439),ctl.dialog.cfg.get('_book_progress')
+header=next(x for x in ctl.dialog.findChildren(QLabel) if 'VOCABULARY' in x.text())
+assert header.text()=='VOCABULARY  ·  四级核心  ·  128/439  ·  到期复习',header.text()
+ctl.dialog.close();app.processEvents()
+print('Qt: automatic next group, banner, Escape and live book progress passed')

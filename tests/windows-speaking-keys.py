@@ -67,7 +67,7 @@ QTest.keyClick(dialog, Qt.Key.Key_Space)
 app.processEvents(); QTest.qWait(60)
 assert not menu_button(dialog).menu().isVisible(), 'Space opened the card menu'
 assert dialog.answer_shown and dialog.force_again, (dialog.answer_shown, dialog.force_again)
-assert dialog.grade_buttons[0].text() == '再练一次并继续', dialog.grade_buttons[0].text()
+assert dialog.grade_buttons[0].text() == 'A. Again 并继续', dialog.grade_buttons[0].text()
 dialog.close(); app.processEvents()
 
 # After the answer is shown, Enter must go back to grading, not to the two prompts.

@@ -74,7 +74,7 @@ stale = [name for name in ('later', 'answer_scroll', 'grade_widget', 'status')
 assert not stale, "host still shows card-one widgets that can swallow clicks: %s" % stale
 
 # A press that reaches one of those host widgets must not destroy the active card.
-for target in (host, host.later, host.answer_scroll, host.grade_widget):
+for target in (host, host.status, host.answer_scroll, host.grade_widget):
     press_on(target)
     QTest.qWait(20); app.processEvents()
     assert ctl.dialog is card, "clicking %s killed the active card" % target

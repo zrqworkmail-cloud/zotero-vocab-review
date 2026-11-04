@@ -16,6 +16,30 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 
+QUIT_REQUEST_NAME = 'zvr-quit-request'
+
+
+def quit_request_path(temp_dir):
+    """Where a restart tool leaves a "please quit Anki properly" note for this add-on."""
+    return Path(str(temp_dir)) / QUIT_REQUEST_NAME
+
+
+def take_quit_request(path):
+    """True once if a quit request is waiting, and the request file is consumed.
+
+    A tray add-on turns every window close — including AnkiConnect's guiExitAnki, which is
+    only mw.close() — into a hide, so an outside tool cannot ask Anki to exit at all. It can
+    leave a note here, and this add-on answers it with the tray's own exit protocol.
+    """
+    try:
+        if path.exists():
+            path.unlink()
+            return True
+    except OSError:
+        return False
+    return False
+
+
 class _Text(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -148,21 +172,46 @@ def link_example_html(safe_html, target, known, style, color="#27344d"):
     return ''.join(pieces)
 
 
+POS_TAG = r'(?:adj|adv|conj|prep|pron|interj|aux|art|num|int|det|vt|vi|n|v)'
+# 'vt&vi.' and 'n./v.' are one marker each. Matching only the bare tag made the second
+# half look like the start of a new line, and the card printed a dangling 'vt&' above
+# 'vi. 出产'. A run may be joined by & / 、 or by a dot between two tags.
+POS_RUN = POS_TAG + r'(?:[\s&/、.]*' + POS_TAG + r')*\.'
+POS_PATTERN = r'(?<![A-Za-z])' + POS_RUN
+POS_LINE = r'^(' + POS_RUN + r')\s*(.*)$'
+
+
 def format_meaning(text):
-    pattern = r'(?<![A-Za-z])(?:adj|adv|conj|prep|pron|interj|aux|art|num|int|det|vt|vi|n|v)\.'
+    pattern = POS_PATTERN
     formatted = re.sub(r'\s*(' + pattern + r')', lambda match: '\n' + match.group(1), normalize_meaning_lists(text), flags=re.I).strip()
     return re.sub(r'(' + pattern + r')(?=[\u3400-\u9fff])', r'\1  ', formatted, flags=re.I)
 
 
-def meaning_table(text, part_width=30):
+def meaning_markers(text):
+    """The part-of-speech labels that open each meaning line, for the column width."""
+    return [match[0] for match in re.findall(r'(?m)' + POS_LINE, format_meaning(text), flags=re.I)]
+
+
+def meaning_table(text, part_width=30, indent=0, gap=8):
+    """A two-column meaning block: part of speech right-aligned, meaning left-aligned.
+
+    The empty `gap` cell is what makes the space between the two columns identical on every
+    line — with the text butted up against the marker column, a short `n.` and a long
+    `n & v.` gave the meaning a different starting distance.
+    """
+    # The leading spacer is what pulls the adj./n. block in under its 【解释】 heading;
+    # Qt rich text honours a fixed-width empty cell and nothing else reliably.
+    lead = '<td width="%d"></td>' % indent if indent else ''
     rows = []
     for line in format_meaning(text).splitlines():
-        match = re.match(r'^([A-Za-z]+\.)\s*(.*)$', line)
+        match = re.match(POS_LINE, line, flags=re.I)
         if match:
-            rows.append('<tr><td width="%d" valign="top">%s</td><td>%s</td></tr>' %
-                        (part_width, html.escape(match.group(1)), html.escape(match.group(2))))
+            rows.append('<tr>%s<td width="%d" align="right" valign="top">%s</td>'
+                        '<td width="%d"></td><td valign="top">%s</td></tr>' %
+                        (lead, part_width, html.escape(match.group(1)), gap,
+                         html.escape(match.group(2).strip())))
         else:
-            rows.append('<tr><td colspan="2">%s</td></tr>' % html.escape(line))
+            rows.append('<tr>%s<td colspan="3">%s</td></tr>' % (lead, html.escape(line.strip())))
     return '<table width="100%" cellspacing="0" cellpadding="0">' + ''.join(rows) + '</table>'
 
 
@@ -194,13 +243,112 @@ def answer_matches(expected, actual):
     return bool(normalize(expected)) and normalize(expected) == normalize(actual)
 
 
-def suggested_ease(correct, hints, incorrect_letters, failed_checks=0):
-    burden = incorrect_letters + 2 * hints + 2 * failed_checks
-    if not correct or hints >= 2 or incorrect_letters >= 4 or failed_checks >= 2 or burden >= 5:
+# Question modes are not equally strong evidence. Producing the spelling is the hardest
+# class, so a slip there counts more and a flawless run counts as "already known";
+# recognising a meaning among four options is the weakest, so its slips are forgiven.
+MODE_DIFFICULTY = {'typing': 3, 'cloze': 2, 'reverse': 2, 'listening': 1, 'speaking': 1,
+                   'choice': 1, 'judgment': 1}
+MODE_WEIGHT = {mode: {1: 0.8, 2: 1.2, 3: 1.5}[difficulty] for mode, difficulty in MODE_DIFFICULTY.items()}
+# Answering one of these inside the window is what turns a right answer into "already
+# known"; 判断题 is excluded because two options make a fast answer a coin flip.
+MASTERED_WINDOW_SECONDS = 3.0
+MASTERED_TIMED_MODES = frozenset(('choice', 'reverse', 'listening', 'speaking', 'cloze'))
+
+
+def letter_weight(index):
+    """How much the letter at `index` is worth when a hint gives it away.
+
+    The user's rule: 前面的字母比后面的字母权重要高. The first letter of an English word
+    narrows the field of candidates far more than the next-to-last, so the value falls off
+    as 1/(i+1) — cheap to compute, and it makes "one letter out of a 14-letter word" and
+    "one letter out of a 5-letter word" mean different things, which a plain count cannot.
+    """
+    return 1.0 / (index + 1)
+
+
+def hint_share(revealed, letters):
+    """The position-weighted fraction of the word that letter hints already gave away."""
+    if letters <= 0 or not revealed:
+        return 0.0
+    total = sum(letter_weight(index) for index in range(letters))
+    given = sum(letter_weight(index) for index in revealed if 0 <= index < letters)
+    return given / total
+
+
+# Bands chosen so that one early letter of a long word is still a good recall (Good), the
+# first letter of a short word is a real give-away (Hard), and a late letter barely counts.
+HINT_SHARE_BANDS = ((0.20, 4), (0.40, 3), (0.70, 2))
+
+
+def ease_from_hint_share(share):
+    for limit, ease in HINT_SHARE_BANDS:
+        if share <= limit:
+            return ease
+    return 1
+
+
+# 一次发音提示几乎等于没提示：用户点名它应当仍然建议 Easy。
+AUDIO_HINT_EASE = {0: 4, 1: 4, 2: 3}
+
+
+def ease_from_audio_hints(uses):
+    return AUDIO_HINT_EASE.get(max(0, int(uses)), 2)
+
+
+def suggested_ease(correct, hints=0, incorrect_letters=0, failed_checks=0, mode=None,
+                   audio_hints=0, revealed=(), letters=0, other_hints=0):
+    """The grade the card should recommend, from what the learner actually needed.
+
+    Two calling styles on purpose: a spelling card now reports its hints by kind (发音 /
+    字母位置 / 释义与例句), which lets a single listen stay Easy and prices a revealed letter
+    by where it sits in the word. Callers that only know a press count keep the old
+    blanket rule — any hint meant Hard — so nothing else in the app changes today.
+    """
+    weight = MODE_WEIGHT.get(mode, 1.0)
+    if not correct:
         return 1
-    if hints or incorrect_letters >= 2 or failed_checks:
-        return 2
-    return 3
+    detailed = bool(audio_hints or other_hints or revealed or letters)
+    if detailed:
+        burden = (incorrect_letters + 2 * failed_checks) * weight
+        if incorrect_letters >= 4 or failed_checks >= 2 or burden >= 5:
+            return 1
+    else:
+        burden = (incorrect_letters + 2 * hints + 2 * failed_checks) * weight
+        if hints >= 2 or incorrect_letters >= 4 or failed_checks >= 2 or burden >= 5:
+            return 1
+    caps = [4]
+    if detailed:
+        caps.append(ease_from_audio_hints(audio_hints))
+        caps.append(ease_from_hint_share(hint_share(revealed, letters)))
+        if other_hints:
+            # 释义和例句直接把答案的方向递过去了，仍按原来的 Hard 处理。
+            caps.append(2)
+    elif hints:
+        caps.append(2)
+    if incorrect_letters >= 2 or failed_checks:
+        caps.append(2)
+    elif incorrect_letters == 1:
+        caps.append(3)
+    return min(caps)
+
+
+def suggests_mastering(mode, correct, hints=0, incorrect_letters=0, failed_checks=0, seconds=None):
+    """When an answer is proof the word is already known, not just recalled this time.
+
+    Producing the spelling of the base form is its own evidence, so it needs no clock.
+    Picking the right meaning out of options is only convincing when it was instant, so
+    those modes have to answer inside the window. Judgment cards are left out entirely:
+    with two options a fast right answer is a coin flip that got lucky.
+    """
+    if not correct or hints or incorrect_letters or failed_checks:
+        return False
+    if mode == 'judgment':
+        return False
+    if mode == 'typing':
+        return True
+    if mode in MASTERED_TIMED_MODES:
+        return seconds is not None and seconds <= MASTERED_WINDOW_SECONDS
+    return False
 
 
 def spelling_hint(word, revealed=0):
@@ -274,7 +422,10 @@ def cloze_sentence(sentence, word):
     if not form:
         return None
     pattern = r'(?<![\w])' + re.escape(form) + r'(?![\w])'
-    return re.sub(pattern, lambda match: spelling_hint(match.group(), 0), sentence, flags=re.I)
+    # The blank is as long as the headword, not as long as the form the sentence happens to
+    # use: a sentence that says "patterns" still asks the learner to type "pattern".
+    blank = spelling_hint(word, 0)
+    return re.sub(pattern, lambda match: blank, sentence, flags=re.I)
 
 
 def masked_example(sentence, word):
@@ -432,8 +583,29 @@ def book_progress(api, cfg):
         return (0, 0)
     base = 'note:"%s"%s -is:suspended -is:buried' % (_escape(cfg['model']), book_clause(book))
     total = len(api('findCards', {'query': base}) or [])
-    learned = len(api('findCards', {'query': base + ' prop:reps:>0'}) or [])
+    # Anki's prop search takes no colon: prop:reps>0. prop:reps:>0 is a parse error,
+    # which is how this count silently failed before it was measured against Anki.
+    learned = len(api('findCards', {'query': base + ' prop:reps>0'}) or [])
     return (learned, total)
+
+
+def book_availability(api, cfg):
+    """(new, due) cards this book can actually show now.
+
+    A book can hold thousands of new cards and still have nothing to hand over,
+    because Anki counts the daily new limit per deck and stops releasing cards once
+    the deck's quota is spent. collection_plan suggests a deadline pace; this answers
+    the narrower "can the button start a session right now" question.
+    """
+    new_now = due_now = 0
+    for deck in resolve_book_decks(api, cfg):
+        stats = _stats(api, deck)
+        base = _search(dict(cfg, deck=deck))
+        new_now += min(int(stats.get('new_count', 0)),
+                       len(api('findCards', {'query': base + ' is:new'}) or []))
+        due_now += min(int(stats.get('learn_count', 0)) + int(stats.get('review_count', 0)),
+                       len(api('findCards', {'query': base + ' is:due'}) or []))
+    return new_now, due_now
 
 
 def _search(cfg, all_decks=False):
@@ -490,8 +662,30 @@ def exam_word_labels(word):
     if key in cet6:
         labels.append('六级词表')
     if key in core_vocabulary()[0]:
-        labels.append('六级社区核心词')
+        # The same words the 词书 menu calls 六级核心; a third name on the card only made
+        # the reader wonder whether it was a different list.
+        labels.append('六级核心')
     return labels
+
+
+# Where each card pill comes from. The card prints one pill per list, so the provenance
+# is per pill as well: a joined sentence named two sources for three labels and left the
+# reader to work out which was which.
+BOOK_LABEL_SOURCES = {
+    '四级词表': 'ECDICT 四六级词表',
+    '六级词表': 'ECDICT 四六级词表',
+    '六级核心': 'CET-6 Top 500 社区整理',
+}
+
+
+def exam_word_sources(labels):
+    """The sources behind a row of pill labels, in order, without repeats."""
+    seen = []
+    for label in labels or []:
+        source = BOOK_LABEL_SOURCES.get(label)
+        if source and source not in seen:
+            seen.append(source)
+    return seen
 
 
 def _weight(card, cfg, captures=None):
@@ -533,6 +727,84 @@ def _cards(api, ids, cfg, limit=80):
 def next_check_delay(now, regular_deadline, smart):
     remaining = max(0, regular_deadline - now)
     return min(300, remaining) if smart else remaining
+
+
+def background_instead_of_quit(tray_present, forcing_quit):
+    """Whether a close of the main window is really a shutdown at all.
+
+    A tray add-on ('Minimize to Tray 2') rewrites `mw.closeEvent` and sets
+    `QApplication.setQuitOnLastWindowClosed(False)`, so the X button means "keep running in
+    the background" — which is exactly what this plug-in needs for its popups to continue.
+    Only its own exit flag (`closeEventFromAction`) or our 退出 Anki makes it a shutdown,
+    and winding the timers down on the other case is what silently stopped all cards for an
+    hour on 2026-11-04.
+    """
+    return bool(tray_present and not forcing_quit)
+
+
+def hide_instead_of_quit(card_open, enabled, forcing_quit):
+    """Closing Anki's main window hides it only while a study card is on screen.
+
+    With no card up, the close button has to keep quitting Anki, or the user is left
+    with a hidden process they cannot close.
+    """
+    return bool(enabled and card_open and not forcing_quit)
+
+
+def sync_due(now, last_attempt, minutes, idle):
+    """Background sync runs on quiet moments only, so it never lands mid-card."""
+    if not idle:
+        return False
+    if last_attempt is None:
+        return True
+    return (now - last_attempt) >= datetime.timedelta(minutes=max(1, int(minutes)))
+
+
+def install_sync_error_guard(sync_module, state, on_error):
+    """Swap a sync module's modal error handler for a silent recorder, and hand back a restore.
+
+    Anki reports every sync failure with a modal dialog. That is right for the sync button
+    and wrong for an idle background sync, so the replacement writes the message into
+    `state['error']`, tells `on_error` once — the caller pauses the timer there — and puts
+    Anki's own handler back so the user's sync button keeps behaving normally.
+    """
+    original = getattr(sync_module, 'handle_sync_error', None)
+    if not callable(original) or getattr(original, 'zvr_silenced', False):
+        return lambda: None
+
+    def silent(_mw, error):
+        state['error'] = '%s: %s' % (type(error).__name__, error)
+        restore()
+        on_error(state['error'])
+
+    def restore():
+        if getattr(sync_module, 'handle_sync_error', None) is silent:
+            sync_module.handle_sync_error = original
+
+    silent.zvr_silenced = True
+    sync_module.handle_sync_error = silent
+    return restore
+
+
+def apply_auto_sync_preference(profile, enabled, remembered):
+    """Switch Anki's sync-on-open-and-close off while background sync is on, and back after.
+
+    `profile['autoSync']` is the same key Anki's own preferences dialog writes, so this
+    is a change the user could make by hand. We record what we found rather than assume
+    it was on, so turning the feature off gives back exactly their own setting.
+    """
+    if profile is None:
+        return remembered
+    current = bool(profile.get('autoSync', True))
+    if enabled:
+        if remembered is None:
+            remembered = current
+        if current:
+            profile['autoSync'] = False
+        return remembered
+    if remembered is not None:
+        profile['autoSync'] = bool(remembered)
+    return None
 
 
 def validate_windows(windows):
@@ -586,8 +858,14 @@ def remaining_window_minutes(now, windows):
                for w in windows if w.get('enabled', True))
 
 
-def study_plan(today, deadline, remaining_new, due, daily_target, done, hours, interval, introduced=0):
-    """Estimate today's workload; due cards remain governed by Anki."""
+def study_plan(today, deadline, remaining_new, due, daily_target, done, hours, interval, introduced=0,
+               available=None):
+    """Estimate today's workload; due cards remain governed by Anki.
+
+    `available` is what Anki will actually put in front of the user today — (new, due) as
+    capped by the deck's own daily limits. The shortfall is measured against that, not
+    against a group size, because a group is now whatever the user says it is.
+    """
     days = None
     suggested_new = 0
     if deadline:
@@ -599,20 +877,29 @@ def study_plan(today, deadline, remaining_new, due, daily_target, done, hours, i
     remaining = max(0, goal - max(0, done))
     new_room = max(0, remaining - max(0, due))
     new_remaining = min(new_room, max(0, suggested_new - max(0, introduced))) if days and days > 0 else min(new_room, max(0, remaining_new))
+    serveable = remaining if available is None else max(0, int(available[0])) + max(0, int(available[1]))
     return {'days': days, 'new': suggested_new, 'new_remaining': new_remaining, 'due': max(0, due), 'goal': goal,
-            'done': max(0, done), 'introduced': max(0, introduced), 'batch': min(10, remaining, max(3, math.ceil(remaining / slots))) if remaining else 0,
-            'capacity_shortfall': max(0, remaining - slots * 10)}
+            'done': max(0, done), 'introduced': max(0, introduced),
+            'batch': min(remaining, max(3, math.ceil(remaining / slots))) if remaining else 0,
+            'capacity_shortfall': max(0, remaining - serveable)}
 
 
 def session_batch_size(cfg, plan=None, manual=False):
+    """How many cards make up one group.
+
+    In fixed mode the number is the user's and nothing caps it: a group of 200 is allowed,
+    and the session simply stops when the book or the day's allowance runs out, with the
+    reason shown. The automatic plan sizes a group from the day's remaining work rather
+    than from a hard ten, which used to turn a 104-card day into eleven separate clicks.
+    """
     if cfg.get('review_plan_mode') == 'daily':
-        batch = max(0, min(10, int((plan or {}).get('batch', 0))))
+        batch = max(0, int((plan or {}).get('batch', 0)))
         return batch or (1 if manual else 0)
-    return max(1, min(10, int(cfg.get('review_batch_size', 3))))
+    return max(1, int(cfg.get('review_batch_size', 3)))
 
 
 def updated_session_target(completed, plan):
-    return max(completed, min(10, max(0, int(plan.get('batch', 0)))))
+    return max(completed, max(0, int(plan.get('batch', 0))))
 
 
 def today_remaining(plan):
@@ -657,9 +944,19 @@ def collection_plan(api, cfg, now=None):
     hours = (remaining_window_minutes(now, cfg.get('review_windows', [])) / 60
              if cfg.get('review_windows_enabled') else min(cfg.get('review_computer_hours', 8),
                  max(0, (24 * 60 - now.hour * 60 - now.minute - now.second / 60) / 60)))
+    # What Anki will actually serve today, capped by each deck's own daily limits: this is
+    # the ceiling a group size cannot get past. Callers that only speak findCards (the
+    # in-process dashboard) cannot answer deck stats, and then simply make no claim about
+    # today's ceiling rather than failing the whole plan.
+    try:
+        available = book_availability(api, cfg)
+    except Exception:
+        available = None
     plan = study_plan(now.date(), cfg.get('review_deadline', ''), len(found['new']),
                       len(found['due']), cfg.get('review_daily_goal', 0), len(found['done']),
-                      hours, cfg.get('review_interval_minutes', 30), len(found['introduced']))
+                      hours, cfg.get('review_interval_minutes', 30), len(found['introduced']), available)
+    if available is not None:
+        plan['available_new'], plan['available_due'] = int(available[0]), int(available[1])
     plan['new_done'] = len(found['introduced'])
     plan['new_goal'] = plan['new_done'] + plan['new_remaining']
     plan['review_done'] = len(found['done'] - found['introduced'])
@@ -759,7 +1056,10 @@ def prepare_question(api, cfg, mode='mixed', rng=random, due_only=False):
         for deck_cfg, stats in zip(deck_cfgs, stats_by_deck):
             allowed = (int(stats.get('learn_count', 0)) + int(stats.get('review_count', 0)) if label == 'due'
                        else int(stats.get('new_count', 0)))
-            if not allowed:
+            # A rating that is still being written has already consumed its slot in
+            # Anki's daily count; the next card must be chosen as if it had landed.
+            allowed -= int(deck_cfg.get('_review_inflight_due' if label == 'due' else '_review_inflight_new', 0))
+            if allowed <= 0:
                 continue
             query = _search(deck_cfg) + ' ' + suffix
             ids = api('findCards', {'query': query}) or []
@@ -869,7 +1169,8 @@ def prepare_question(api, cfg, mode='mixed', rng=random, due_only=False):
         'profile': profile, 'card_id': card['cardId'], 'review_deck': cfg['deck'], 'kind': kind, 'mode': mode, 'word': word,
         'meaning': meaning, 'options': options, 'source_form': source_form,
         'judgment_statement': judgment_statement, 'judgment_correct': judgment_correct,
-        'answer_form': cloze_form(sentence, word) if mode == 'cloze' else word,
+        'answer_form': word,
+        'cloze_shown': cloze_form(sentence, word) if mode == 'cloze' else '',
         'phonetic': clean_text(_field(card, '音标')),
         'roots': clean_detail(_field(card, '词根')),
         'mnemonic': clean_detail(_field(card, '识记方法')),
@@ -882,6 +1183,28 @@ def prepare_question(api, cfg, mode='mixed', rng=random, due_only=False):
         'cloze': cloze_sentence(sentence, word) if sentence else '',
         'snapshot': {key: card.get(key) for key in ('queue', 'due', 'reps', 'mod')},
     }
+
+
+MASTERED_TAG = 'zvr_mastered'
+# Anki's own four buttons, by ease. The card prints them as `A. Again` … `D. Easy`, and the
+# look-back names a card the user already rated with the same words.
+EASE_NAMES = {1: 'Again', 2: 'Hard', 3: 'Good', 4: 'Easy'}
+
+
+def mark_mastered(api, cfg, question):
+    """Take a word out of study without grading it.
+
+    Suspend is the lever Anki itself honours, and every card query here already
+    excludes suspended cards, so the word stops appearing at once and stays fully
+    reversible. The tag is what makes the decision findable later: everything marked
+    here can be recovered with one browser search instead of a guess.
+    """
+    card_id = question['card_id']
+    notes = [item.get('note') for item in (api('cardsInfo', {'cards': [card_id]}) or []) if item.get('note')]
+    api('suspend', {'cards': [card_id]})
+    if notes:
+        api('addTags', {'notes': notes, 'tags': MASTERED_TAG})
+    return notes[0] if notes else None
 
 
 def submit_review(api, cfg, question, ease, answer=None):

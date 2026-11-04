@@ -15,7 +15,7 @@ qt=types.ModuleType('aqt.qt')
 for n in ('QObject','QTimer','Qt','pyqtSignal','QEasingCurve','QEvent','QRectF','QVariantAnimation','QUrl','QColor','QPainter','QDesktopServices','QMenu','QMessageBox','QCursor','QFontMetrics','QApplication','QComboBox','QDialog','QHBoxLayout','QLabel','QLineEdit','QPushButton','QScrollArea','QStyle','QVBoxLayout','QWidget'): setattr(qt,n,globals()[n])
 sys.modules['aqt']=aqt;sys.modules['aqt.qt']=qt
 package=types.ModuleType('zotero_global_capture');package.__path__=[os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'anki-global-addon', 'zotero_global_capture'))];sys.modules['zotero_global_capture']=package
-from zotero_global_capture.review_popup import ReviewDialog
+from zotero_global_capture.review_popup import ReviewDialog, syllable_display
 
 
 from PyQt6.QtTest import QTest
@@ -47,14 +47,27 @@ for theme in ('dark','light'):
  finally:
   del dialog.setUpdatesEnabled
  assert suppressed and suppressed[0] is False and suppressed[-1] is True,(theme,suppressed)
- assert dialog.geometry()==before,(theme,dialog.geometry(),before)
+ # The flip must not change the width or move the card — that jump was the complaint — and
+ # it must not grow. Trimming dead height is allowed, and is what stops the answer's foot
+ # being a blank band with the word-list pills floating in it.
+ assert dialog.width()==before.width(),(theme,dialog.width(),before.width())
+ # A centred card is re-centred when it shrinks, so the corner may drift a little; a jump
+ # of more than a few pixels is the movement the user rejected.
+ assert abs(dialog.x()-before.x())<=8 and abs(dialog.y()-before.y())<=8,\
+  (theme,dialog.pos(),before.topLeft())
+ assert 360 <= dialog.height() <= before.height(),(theme,dialog.height(),before.height())
+ assert dialog.height()==dialog.layout().sizeHint().height() or before.height()-dialog.height()<24,\
+  (theme,'the answer left dead height: %d of %d' % (dialog.layout().sizeHint().height(),dialog.height()))
  assert dialog.isVisible() and dialog.answer_shown,(theme,dialog.isVisible(),dialog.answer_shown)
  assert not dialog._flipping
  assert not dialog.prompt_label.isVisible() and not dialog.question_block.isVisible()
  assert not dialog.letter_scroll.isVisible()
- assert dialog.answer_word.text()==question['word'] and dialog.answer_word.isVisible()
+ shown=syllable_display(question['word'])
+ assert dialog.answer_word.text()==shown and dialog.answer_word.isVisible(),(theme,dialog.answer_word.text(),shown)
+ assert question['word'] in dialog.answer_word.toolTip(),(theme,dialog.answer_word.toolTip())
  assert dialog.answer_scroll.isVisible() and dialog.grade_widget.isVisible()
- assert dialog.grade_buttons[2].isEnabled() and dialog.later.text()=='不评分，结束'
+ assert dialog.grade_buttons[2].isEnabled() and not dialog.later.isVisible(),\
+  (theme, 'the answer face must not spend a row on 不评分，结束')
  assert '建议' in dialog.status.text(),dialog.status.text()
  shot=dialog.grab().toImage()
  assert shot.pixelColor(shot.width()//2,shot.height()//2).alpha()>0
