@@ -185,12 +185,48 @@ def polite_quit(pid, seconds=45):
     return False
 
 
+def installed_config():
+    """The config the running add-on actually reads: meta.json → config."""
+    import os
+    meta = (Path(os.environ.get('APPDATA', str(Path.home()))) /
+            'Anki2/addons21/zotero_global_capture/meta.json')
+    try:
+        return (json.loads(meta.read_text(encoding='utf-8')).get('config') or {})
+    except (OSError, ValueError):
+        return {}
+
+
+def live_scope():
+    """(search fragment, label, model) for the 词组 selection in force right now.
+
+    Resolved with the add-on's own code so the canary cannot drift from what is studied.
+    It used to be hard-wired to `tag:zvr_cet6_core`, and kept printing "unchanged: True"
+    after the learner had moved to 六级全表 — a fingerprint watching the wrong shelf (§9.48).
+    Falling back to the whole note type is honest only if it is announced, so it is.
+    """
+    cfg = installed_config()
+    model = cfg.get('model') or '四六级单词模板'
+    sys.path.insert(0, str(REPO / 'anki-global-addon' / 'zotero_global_capture'))
+    try:
+        import review_logic
+        clause = review_logic.selection_clause(review_logic.current_entries(cfg))
+        label = review_logic.selection_summary(cfg) or '整库'
+        return clause, label, model
+    except Exception as error:
+        print('cannot resolve the live 词组 selection (%s) — fingerprint watches the whole '
+              'note type instead' % type(error).__name__)
+        return '', '整库（词书未解析）', model
+
+
 def counts():
     """A fingerprint of the collection, compared before and after the restart."""
-    probes = (('book cards', 'findCards', 'note:"四六级单词模板" tag:zvr_cet6_core -is:suspended -is:buried'),
-              ('book learned', 'findCards', 'note:"四六级单词模板" tag:zvr_cet6_core -is:suspended -is:buried prop:reps>0'),
+    clause, label, model = live_scope()
+    print('fingerprint watches: %s' % label)
+    base = 'note:"%s"%s -is:suspended -is:buried' % (model, clause)
+    probes = (('book cards', 'findCards', base),
+              ('book learned', 'findCards', base + ' prop:reps>0'),
               ('mastered', 'findNotes', 'tag:zvr_mastered'),
-              ('total notes', 'findNotes', 'note:"四六级单词模板"'))
+              ('total notes', 'findNotes', 'note:"%s"' % model))
     return {label: len(connect(action, {'query': query})) for label, action, query in probes}
 
 

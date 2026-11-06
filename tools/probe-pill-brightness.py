@@ -130,7 +130,7 @@ overlay.with_confetti = False
 overlay.raise_()
 overlay.show()
 cx = dialog.width() // 2
-cy = int(dialog.height() * motion_view.BADGE_TOP_FRACTION)
+cy = motion_view.badge_centre(dialog.height(), overlay.tier, dialog.width() * 0.78)[0]
 print('tier 4 pill colour is', overlay.badge_color())
 for ms in (0, 60, 120, 180, 260, 400, 600, 780, 900, 970):
     overlay.progress = ms / 980.0
