@@ -25,24 +25,55 @@ except ImportError:  # an older aqt.qt shim may not re-export every name
     from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
     from PyQt6.QtWidgets import QWidget
 
-from .card_motion import (TIMING, shows_confetti, shows_sparks, tier_caption, tier_label,
-                          total_ms)
+from . import candy_badge, card_motion
+from .card_motion import TIMING, badge_pose, shows_confetti, tier_caption, total_ms
 
-BADGE_HEIGHT = 64
-BADGE_FONT_PX = 26
-CAPTION_FONT_PX = 11
-BADGE_TOP_FRACTION = 0.68
-SPARK_REACH = 150
-SPARK_SIZE = 13
+# Superseded on 2026-11-05 by `badge_centre` below. The history lives in that function's
+# docstring and in AUDIT §9.49: this number was moved 0.24 → 0.68 → 0.60 → 0.50 on opinion,
+# and the value that finally looked right cleared the word by luck (2 px on tier 3). Nothing
+# reads it any more, and nothing should re-introduce it — the clearance is a rule now.
+# The badge is one drawn object now (see candy_badge), so the only particles left are the
+# falling paper on the two no-hint tiers. Their colours come from the same palette so the
+# confetti cannot read as a different design system landed on top.
 CONFETTI_FALL = 340
+CONFETTI_COLORS = ('#FFD84A', '#FF4FA3', '#FFF6C8', '#7FE3FF', '#3FBF5F')
 # Fixed layouts instead of random ones: the same tier should look the same every time, and a
 # deterministic particle set is what lets the offscreen check assert on it.
-SPARK_ANGLES = tuple(range(0, 360, 45))
 CONFETTI_SLOTS = (-196, -160, -128, -96, -64, -32, 0, 30, 62, 94, 126, 158, 186, 210)
 # Each piece starts a little later than the one before it. Without the stagger every piece
 # shares one height at any given moment, which rendered as a line of debris across the card
 # rather than paper falling.
 CONFETTI_STAGGER = 0.045
+# The analytic reach under-reads the real one: on the live card tier 3's topmost painted
+# pixel sat 162 px above the anchor where the geometry predicted 130. 1.25 is that measured
+# gap, not a safety blanket — and the pixel-diff check re-measures it on every run.
+BADGE_REACH_MARGIN = 1.25
+
+
+def badge_footprint(tier, max_width, fit=1.0):
+    """How tall the celebration actually paints — glow, rays, stars and ribbon included.
+
+    Not the font size: on the live card the topmost painted pixel of tier 3 sat 162 px above
+    the anchor where the letters suggested ~130. `candy_badge.paint_extent` reads the same
+    constants the painter uses, and `BADGE_REACH_MARGIN` covers the gap between that
+    arithmetic and the pixels.
+    """
+    above, below = candy_badge.paint_extent(card_motion.tier_caption(tier), tier,
+                                            max_width=max_width, scale=card_motion.POP_TARGET)
+    return (above + below) * BADGE_REACH_MARGIN * fit
+
+
+def badge_centre(height, tier, max_width, rows=()):
+    """Return (y, fit) for a celebration of `tier` on a card `height` tall.
+
+    One implementation on purpose: the overlay paints through it, and the mockup and probe
+    tools ask it the same question, so a preview can never show a placement the shipped card
+    does not have. `rows` are the protected rectangles in card coordinates; with none given
+    it degenerates to the centre of the card.
+    """
+    spans = [(row.top(), row.bottom()) for row in rows] if rows else []
+    y, fit = card_motion.badge_anchor(height, badge_footprint(tier, max_width), spans)
+    return int(y), fit
 
 
 class Celebration(QWidget):
@@ -53,6 +84,10 @@ class Celebration(QWidget):
         self.tier = 0
         self.progress = 0.0
         self.duration = 0
+        # Rows the celebration may not sit on, supplied by the card at play time.
+        self.word_row = None
+        self.protected = ()
+        self._placement = None
         self.dark = theme == 'dark'
         self.animation = QVariantAnimation(self)
         self.animation.setStartValue(0.0)
@@ -67,15 +102,24 @@ class Celebration(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.hide()
 
-    def play(self, tier, setting_mode='full'):
-        """Start (or restart) the sequence for this tier; tier 0 and 'off' show nothing."""
+    def play(self, tier, cfg=None, word_row=None, protected=()):
+        """Start (or restart) the sequence for this tier; tier 0 and an off switch show nothing.
+
+        `word_row` and `protected` are rectangles in this overlay's own coordinates that the
+        celebration may not sit on — the word being celebrated first among them, because
+        covering the word the learner just spelled correctly is the one thing this animation
+        must not do. They arrive from the card, which is the only place that knows where they
+        actually are.
+        """
         self.stop()
         self.tier = int(tier)
-        self.duration = total_ms(self.tier, setting_mode)
+        self.duration = total_ms(self.tier, cfg)
+        self.word_row = word_row
+        self.protected = tuple(protected or ())
+        self._placement = None
         if not self.duration:
             return False
-        self.with_sparks = shows_sparks(self.tier) and setting_mode == 'full'
-        self.with_confetti = shows_confetti(self.tier) and setting_mode == 'full'
+        self.with_confetti = shows_confetti(self.tier)
         self.setGeometry(self.parent().rect() if self.parent() else QRectF())
         self.raise_()
         self.show()
@@ -105,21 +149,29 @@ class Celebration(QWidget):
         anchor = self._anchor()
         if self.with_confetti:
             self._paint_confetti(painter, anchor)
-        if self.with_sparks:
-            self._paint_sparks(painter, anchor)
         self._paint_badge(painter, anchor)
         painter.end()
 
-    def _anchor(self):
-        """Where the celebration is centred: over the feedback line, never over the word.
+    def _place(self):
+        """Where the badge goes, and how big it may be. Computed once per celebration."""
+        if getattr(self, '_placement', None) is None:
+            self._placement = badge_centre(self.height(), self.tier, self.width() * 0.78,
+                                           self.protected)
+        return self._placement
 
-        The mockup stamped it at the card's middle, which on the real answer face lands exactly
-        on the word being celebrated — the live capture of `stress` (2026-11-04) showed the
-        pill covering the word and the 音标, reading as a glitch. The lower third already holds
-        回答正确, so the badge belongs there.
+    def _anchor(self):
+        """The badge's centre, chosen so its painted reach clears the word it celebrates.
+
+        This used to be `height × BADGE_TOP_FRACTION`, and the history of that number is a
+        lesson in measuring before arguing: 0.24 put it on the word row (AUDIT §9.39),
+        0.60/0.68 moved it onto the 回答正确 line, and 0.50 read as "centre of the card".
+        The centre was never the requirement — *not covering the word* was — and a fixed
+        fraction satisfied it by luck: 2 px of clearance on tier 3, 27 px on tier 4, and
+        confetti sweeping straight through on tiers 1-2. Now the clearance is the rule.
         """
         from PyQt6.QtCore import QPoint
-        return QPoint(self.width() // 2, int(self.height() * BADGE_TOP_FRACTION))
+        y, _fit = self._place()
+        return QPoint(self.width() // 2, y)
 
     def _phase(self, name, part=None):
         """0..1 through one step of the timeline, or 0 when it is not this step's turn."""
@@ -141,92 +193,30 @@ class Celebration(QWidget):
         return raw
 
     def _paint_badge(self, painter, anchor):
+        """Hand the whole celebration to `candy_badge`, with the pose from `card_motion`.
+
+        The Qt layer deliberately owns nothing about how it looks or moves: it supplies the
+        anchor, the two words, the tier, and the card's width, and asks for the pose at the
+        current progress. That is what makes the choreography testable without a window.
+        """
         raw = self._phase('badge')
         if raw <= 0:
             return
-        entering = self._phase('badge', 'in')
-        leaving = self._phase('badge', 'out')
-        scale = 0.2 + (1.14 - 0.2) * entering if entering < 1 else 1.0
-        angle = -8.0 * (1.0 - entering)
-        opacity = min(1.0, entering * 1.6) * (1.0 - leaving)
-        if opacity <= 0.01:
-            return
-        label, caption = tier_label(self.tier), tier_caption(self.tier)
-        painter.save()
-        painter.setOpacity(opacity)
-        painter.translate(anchor.x(), anchor.y())
-        painter.rotate(angle)
-        painter.scale(scale, scale)
-        font = QFont(self.font())
-        font.setPixelSize(BADGE_FONT_PX)
-        font.setBold(True)
-        painter.setFont(font)
-        width = max(190, painter.fontMetrics().horizontalAdvance(label) + 56)
-        box = QRectF(-width / 2, -BADGE_HEIGHT / 2, width, BADGE_HEIGHT)
-        path = QPainterPath()
-        path.addRoundedRect(box, BADGE_HEIGHT / 2, BADGE_HEIGHT / 2)
-        painter.fillPath(path, QColor(self.badge_color()))
-        # Stroke the rounded outline, not a rectangle around it: drawRect on a pill put square
-        # corners over the rounded fill, which is the first thing that looks broken in a
-        # screenshot.
-        border = QPen(QColor('#ffffff'))
-        border.setWidthF(2.5)
-        painter.setPen(border)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawPath(path)
-        # The two lines are placed by metrics inside the pill. Drawing the caption at
-        # "box centre + height/2 - 4" put it on the border, where it read as clipped text.
-        painter.setPen(QColor(self.badge_text()))
-        painter.drawText(box.adjusted(0, -11, 0, 0),
-                         int(Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextSingleLine), label)
-        small = QFont(font)
-        small.setPixelSize(CAPTION_FONT_PX)
-        small.setBold(True)
-        painter.setFont(small)
-        painter.drawText(box.adjusted(0, 17, 0, 0),
-                         int(Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextSingleLine), caption)
-        painter.restore()
-
-    def badge_color(self):
-        return ('#ffd166' if self.tier == 1 else '#ffe58a' if self.tier == 2 else
-                '#a7f3d0' if self.tier == 3 else '#cdd9ff')
-
-    def badge_text(self):
-        return '#20164a'
-
-    def _paint_sparks(self, painter, anchor):
-        raw = self._phase('sparks')
-        if raw <= 0:
-            return
-        step = TIMING['sparks']
-        painter.save()
-        painter.setPen(Qt.PenStyle.NoPen)
-        for index in range(step['count']):
-            angle = SPARK_ANGLES[index % len(SPARK_ANGLES)]
-            reach = SPARK_REACH * raw
-            size = SPARK_SIZE * (1.0 - raw * 0.55)
-            painter.save()
-            painter.setOpacity(max(0.0, 1.0 - raw))
-            painter.translate(anchor.x(), anchor.y())
-            painter.rotate(angle)
-            painter.translate(reach, 0)
-            star = QPainterPath()
-            star.moveTo(0, -size)
-            star.lineTo(size * 0.32, 0)
-            star.lineTo(0, size)
-            star.lineTo(-size * 0.32, 0)
-            star.closeSubpath()
-            painter.setBrush(QColor('#aab9ff' if self.dark else '#5668ca'))
-            painter.drawPath(star)
-            painter.restore()
-        painter.restore()
+        pose = badge_pose(raw, self.tier, TIMING['badge']['duration'])
+        _y, fit = self._place()
+        candy_badge.draw(painter, anchor, tier_caption(self.tier), self.tier, pose,
+                         max_width=self.width() * 0.78, pixel_cap=candy_badge.WORD_PIXEL * fit)
 
     def _paint_confetti(self, painter, anchor):
+        """Falling paper for the two no-hint tiers, cut as ribbons rather than rectangles.
+
+        The reference art scatters curled strips, not squares; a square piece of "confetti"
+        over a dark card is the flat clipart the user already rejected twice.
+        """
         raw = self._phase('confetti')
         if raw <= 0:
             return
         step = TIMING['confetti']
-        colors = ('#ffd166', '#71e0b5', '#aab9ff', '#ff99a9', '#cdd9ff')
         painter.save()
         for index in range(step['count']):
             local = (raw - index * CONFETTI_STAGGER) / max(0.05, 1.0 - index * CONFETTI_STAGGER)
@@ -235,14 +225,22 @@ class Celebration(QWidget):
             local = min(1.0, local)
             offset = CONFETTI_SLOTS[index % len(CONFETTI_SLOTS)]
             x = anchor.x() + offset + 14 * math.sin(math.pi * local * 2 + index)
-            y = -24 + CONFETTI_FALL * local
+            top, room = card_motion.confetti_span(
+                self.height(), self.word_row.bottom() if self.word_row is not None else None)
+            y = top + min(CONFETTI_FALL, room) * local
             painter.save()
             painter.setOpacity(max(0.0, 1.0 - local * local))
             painter.translate(x, y)
             painter.rotate(local * 540 + index * 20)
-            painter.setBrush(QColor(colors[index % len(colors)]))
+            strip = QPainterPath()
+            strip.moveTo(-5, -8)
+            strip.quadTo(0, -2, -5, 8)
+            strip.lineTo(5, 8)
+            strip.quadTo(0, 2, 5, -8)
+            strip.closeSubpath()
+            painter.setBrush(QColor(CONFETTI_COLORS[index % len(CONFETTI_COLORS)]))
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawRect(QRectF(-4.5, -7, 9, 14))
+            painter.drawPath(strip)
             painter.restore()
         painter.restore()
 

@@ -24,15 +24,17 @@ from aqt.qt import (
 )
 
 from .background import configure_login_start
+from . import card_motion
 from .review_popup import DesktopReviewController, enable_click_away, popup_style
 from .review_logic import (BOOK_MIGRATION, apply_auto_sync_preference, book_clause, book_label, book_progress,
                            collection_plan, hide_instead_of_quit, background_instead_of_quit, install_sync_error_guard, resolve_book_decks,
                            study_book, study_book_id, study_books, selected_review_modes, sync_due,
-                           quit_request_path, take_quit_request,
+                           MODE_LABELS, MODE_ORDER,
+                           quit_request_path, take_quit_request, MASTERED_TAG,
                            validate_windows, window_minutes)
 from .exam_dates import fetch_cet
 from .study_dashboard import activity_counts, dashboard_html
-from . import core_import, cet6_books, cet6_listening, audio_volume, speech
+from . import core_import, cet6_books, cet6_listening, audio_volume, speech, review_logic, review_quality
 
 
 ADDON = __name__
@@ -72,6 +74,13 @@ DEFAULTS = {
     ],
     "review_auto_word": True,
     "review_hint_audio": False,
+    # The answer face used to lay out every example the note carries, which is the tallest
+    # block on the card and the one the learner reads least. On by default, because that is
+    # what an existing install already does.
+    "review_show_example": True,
+    # 'suspend' is what 已掌握 has always meant; 'easy' hands the same judgement to the
+    # scheduler instead of taking the word out of it. Switching never moves existing cards.
+    "review_mastered_action": "suspend",
     "review_auto_example": False,
     "review_auto_example_mode": "first",
     # Anki's own text-to-speech sits around -21 dBFS, which reads as quiet on a laptop;
@@ -86,6 +95,8 @@ DEFAULTS = {
     # 拼写题的动效档位：full = 字母跳跃 + 庆祝徽章 + 星芒/彩带；calm = 只留跳跃与徽章；
     # off = 完全不画。默认 full 是用户 2026-11-04 批准样稿时定的。
     "review_motion": "full",
+    "review_motion_hop": True,
+    "review_motion_celebration": True,
     "review_start_at_login": False,
 }
 WM_HOTKEY = 0x0312
@@ -999,6 +1010,21 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     review_auto_word.setChecked(bool(cfg["review_auto_word"]))
     review_hint_audio = QCheckBox("字母提示时朗读该字母")
     review_hint_audio.setChecked(bool(cfg["review_hint_audio"]))
+    # Off means the answer face stops laying out 例句/权威例句 cards. 例句填空 keeps its
+    # sentence (the question is the example), and the 例句 hint button stays offered — asking
+    # for one is a choice the learner makes, and it counts as a hint.
+    review_show_example = QCheckBox("答案面显示例句（例句填空和「例句」提示按钮不受影响）")
+    review_show_example.setChecked(bool(cfg.get("review_show_example", True)))
+    # 「已掌握」used to mean exactly one thing — suspend — which quietly contradicts spaced
+    # repetition: a parked card is never tested again. The rate mode expresses the same
+    # judgement in the scheduler's language. Default stays suspend, and switching modes does
+    # not move the cards that are already suspended; the quality report lists them instead.
+    review_mastered_action = QComboBox()
+    review_mastered_action.setObjectName('masteredAction')
+    review_mastered_action.addItem("挂起：不再出现，随时可恢复", "suspend")
+    review_mastered_action.addItem("按 Easy 评分：留在排程里，间隔由 Anki 算", "easy")
+    review_mastered_action.setCurrentIndex(max(0, review_mastered_action.findData(
+        cfg.get("review_mastered_action", "suspend") or "suspend")))
     review_auto_example = QComboBox()
     for label, value in (("第一条例句", "first"), ("不自动朗读", "off"), ("普通例句", "example"), ("权威例句", "authority"), ("所有例句", "all")):
         review_auto_example.addItem(label, value)
@@ -1068,11 +1094,8 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     review_modes_layout.setSpacing(3)
     chosen_modes = selected_review_modes(cfg)
     mode_checks = []
-    for label, value in (("英文选中文", "choice"), ("中文选英文", "reverse"),
-                         ("释义拼写", "typing"), ("例句填空", "cloze"),
-                         ("听音拼写", "listening"), ("单词释义判断", "judgment"),
-                         ("口语回忆（自主评分）", "speaking")):
-        check = QCheckBox(label)
+    for value in MODE_ORDER:
+        check = QCheckBox(MODE_LABELS[value])
         check.setProperty('reviewMode', value)
         check.setChecked(value in chosen_modes)
         review_modes_layout.addWidget(check)
@@ -1142,6 +1165,8 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     form.addRow("已收录单词标记", known_style)
     form.addRow("自动发音", review_auto_word)
     form.addRow("字母提示发音", review_hint_audio)
+    form.addRow(review_show_example)
+    form.addRow("「已掌握」按钮", review_mastered_action)
     form.addRow("例句发音", review_auto_example)
     form.addRow("朗读音量", volume_widget)
     volume_help = QLabel("100% 表示什么都不改。高于 100% 时，插件会用同一套系统语音把单词重新录一遍，"
@@ -1150,17 +1175,24 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     volume_help.setWordWrap(True)
     form.addRow(volume_help)
     form.addRow("卡片外观", review_beautify)
-    motion_row = QWidget()
-    motion_layout = QHBoxLayout(motion_row)
-    motion_layout.setContentsMargins(0, 0, 0, 0)
-    motion_checks = {}
-    for motion_label, motion_value in (("全部动效", "full"), ("只要庆祝", "calm"), ("关闭动效", "off")):
-        motion_checks[motion_value] = QRadioButton(motion_label)
-        motion_layout.addWidget(motion_checks[motion_value])
-    motion_checks.get(cfg.get("review_motion", "full"), motion_checks["full"]).setChecked(True)
-    form.addRow("卡片动效", motion_row)
-    motion_help = QLabel("拼写题一次写对时会有庆祝徽章，字母落格时轻微跳动。"
-                         "「只要庆祝」去掉星芒和彩带，「关闭动效」什么都不画，评分与排程完全不受影响。")
+    # Two switches, not one three-way radio: the letter hop is feedback while you type and the
+    # badge is the reward after it, and "letters still, no pop-up" is a thing people want.
+    # A saved older `review_motion` still decides both when these two have never been written.
+    motion_hop = QCheckBox("拼写时字母跳动")
+    motion_hop.setObjectName('motionHop')
+    motion_hop.setToolTip("打对字母在原格子里轻轻跳一下，打错左右抖一下。")
+    motion_celebration = QCheckBox("答对时弹出庆祝特效")
+    motion_celebration.setObjectName('motionCelebration')
+    motion_celebration.setToolTip("一次写对时弹出金色立体庆祝字（UNBELIEVABLE / PERFECT / GREAT / NICE），"
+                                  "高档还带星芒、三星和彩带。答错永远不弹。")
+    motion_hop.setChecked(card_motion.hop_allowed(cfg))
+    motion_celebration.setChecked(card_motion.celebration_allowed(cfg))
+    form.addRow(motion_hop)
+    form.addRow(motion_celebration)
+    motion_help = QLabel("分工：第一个勾只管打字过程中的字母反馈（打对向上跳、打错左右抖），"
+                         "第二个勾只管答对之后弹出的庆祝特效（立体字、星芒、缎带、宝石、彩带）。"
+                         "两个互不影响：只关庆祝，字母照样跳；只关跳动，答对仍然弹徽章。都不勾就什么都不动。"
+                         "卡片上再没有别的动效受这两个勾控制，评分、建议与排程也完全不受影响。")
     motion_help.setWordWrap(True)
     form.addRow(motion_help)
     buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
@@ -1320,6 +1352,8 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
                 "review_windows": windows_value(),
                 "review_auto_word": review_auto_word.isChecked(),
                 "review_hint_audio": review_hint_audio.isChecked(),
+                "review_show_example": review_show_example.isChecked(),
+                "review_mastered_action": review_mastered_action.currentData(),
                 "review_auto_example_mode": review_auto_example.currentData(),
                 "review_volume": review_volume.value(),
                 "review_smart": review_smart.isChecked(),
@@ -1330,8 +1364,8 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
                 "review_modes": review_modes_value(),
                 "review_known_style": known_style.currentData(),
                 "review_beautify": review_beautify.isChecked(),
-                "review_motion": next((value for value, check in motion_checks.items()
-                                       if check.isChecked()), "full"),
+                "review_motion_hop": motion_hop.isChecked(),
+                "review_motion_celebration": motion_celebration.isChecked(),
                 "review_start_at_login": review_start_at_login.isChecked()})
     listener_changed = any(cfg[key] != original[key] for key in ('mode', 'modifiers', 'virtual_key'))
     if listener_changed:
@@ -1400,6 +1434,8 @@ def menu_action():
     listening = review_menu.addAction("六级听力：本地真题与模拟")
     listening.triggered.connect(open_cet6_listening)
     review_menu.addSeparator()
+    report = review_menu.addAction("生成复习质量报告（只读）")
+    report.triggered.connect(write_quality_report)
     manage = review_menu.addMenu("词书与词表管理")
     for label, handler in (("四六级核心词：补充缺失词汇", import_core_words),
                            ("四六级核心词：查看词表", browse_core_words),
@@ -1410,6 +1446,87 @@ def menu_action():
                            ("六级词书（KyleBing）：查看词汇", lambda: browse_cet6_book('cet6_kyle'))):
         manage.addAction(label).triggered.connect(handler)
     return action, review_menu
+
+
+def write_quality_report():
+    """Measure this collection against its own promises, and write the answer out as a file.
+
+    Read-only by construction: two SELECTs and one card search — no write, no reschedule, and
+    nothing unsuspended. `desiredRetention = 0.9` is a claim about the learner's future memory
+    and revlog is the only place that claim can be checked, which is the whole reason this
+    menu entry exists. The 已掌握 table says the same about parked cards: there is no retention
+    to report for a card that is never tested again, only how long it has been since it was.
+
+    Runs on the GUI thread on purpose: `col.db` and `find_cards` are not thread-safe, and the
+    queries here measured under a second against 6,885 notes.
+    """
+    if mw.col is None:
+        show_feedback('Anki 还没打开账户，暂时读不到复习记录。')
+        return
+    cfg = settings()
+    try:
+        # The column is `ease`, not `rating` (measured against the live schema 2026-11-06 —
+        # the query I first wrote raised OperationalError, which is exactly why this report
+        # was run outside Anki before being trusted). Rows with ease 0 are not learner answers
+        # at all (385 of them here: state changes and syncs), and counting them as successes
+        # would inflate the retention the report is supposed to audit.
+        retention = [(int(row[0]), int(row[1])) for row in mw.col.db.all(
+            'select lastIvl, ease from revlog where lastIvl >= 1 and ease between 1 and 4')]
+    except Exception as error:
+        show_feedback('复习记录读不出来：%s' % type(error).__name__)
+        return
+    parked = []
+    try:
+        ids = [int(cid) for cid in mw.col.find_cards('is:suspended tag:"%s"' % MASTERED_TAG)]
+        if ids:
+            # `revlog.id` is milliseconds since the epoch (measured: 1793967780194 next to a
+            # wall clock of 1793967939.235 s), and there is no `date` column in this schema.
+            answers = {}
+            for row in mw.col.db.all('select cid, max(id) from revlog where cid in (%s)'
+                                     ' group by cid' % ','.join(str(cid) for cid in ids)):
+                answers[int(row[0])] = int(row[1] or 0)
+            now_ms = time.time() * 1000
+            parked = [None if not answers.get(cid) else int((now_ms - answers[cid]) / 86400000)
+                      for cid in ids]
+    except Exception as error:
+        log_runtime('parked card survey failed: %s' % type(error).__name__)
+    summary = review_quality.summarize(retention, parked)
+    # The ceilings and the promised retention come from AnkiConnect, and AnkiConnect is served
+    # by this very GUI thread — asking it from here waits on yourself and times out (measured:
+    # `deck limits unavailable: TimeoutError`, 2026-11-06, the first time this menu was used).
+    # So the collection reads happen now, and the questions that need AnkiConnect go to a
+    # thread, which is how every other maintenance action in this file already works.
+    show_feedback('正在读牌组额度…')
+
+    def work():
+        limits_text, promised = '', 0.9
+        try:
+            limits = review_logic.deck_limits(api, dict(cfg))
+            limits_text = review_logic.render_deck_limits(limits)
+            promised = next((float(item['desired_retention']) for item in limits
+                             if item.get('desired_retention')), 0.9)
+        except Exception as error:
+            log_runtime('deck limits unavailable: %s' % type(error).__name__)
+        body = review_quality.render_markdown(
+            review_quality.summarize(retention, parked, promised=promised), limits_text)
+        folder = os.path.join(os.path.dirname(__file__), 'user_files', 'reports')
+        path = os.path.join(folder, 'quality-%s.md' % time.strftime('%Y%m%d-%H%M%S'))
+        try:
+            os.makedirs(folder, exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as handle:
+                handle.write(body)
+        except OSError as error:
+            mw.taskman.run_on_main(lambda: show_feedback('报告没能写出：%s' % type(error).__name__))
+            return
+        log_runtime('quality report written: %s' % path)
+        measured = '—' if summary['measured'] is None else '%.0f%%' % (100 * summary['measured'])
+        mw.taskman.run_on_main(lambda: show_feedback(
+            '复习质量报告已写出：%s\n到期作答 %d 次，实测保持率 %s（承诺 %.0f%%）；挂起 %d 张。'
+            '评分对照请用 tools/analyze-grading-agreement.py。' % (
+                path, summary['answers'], measured, 100 * promised, summary['parked_total']),
+            period=15000))
+
+    threading.Thread(target=work, daemon=True).start()
 
 
 def import_core_words():
@@ -1652,13 +1769,23 @@ class MainWindowCloseFilter(QObject):
     Anki quits when its main window closes, which takes the study popup with it. With a
     card on screen the close button hides the window instead; with none it still quits
     normally, so Anki never turns into a process the user cannot close.
+
+    Only the X button is ambiguous. The tray add-on's own 退出 and our card's 「退出 Anki」
+    both say so before they call `mw.close()`, and either one outranks a card being on
+    screen — an exit the user asked for is never turned into a hide.
     """
 
     def eventFilter(self, watched, event):
         try:
             if event.type() != QEvent.Type.Close:
                 return False
-            forcing = bool(getattr(mw, "zvr_force_quit", False))
+            forced = bool(getattr(mw, "zvr_force_quit", False))
+            # 'Minimize to Tray 2' raises its own flag inside onExit, one step before it
+            # calls mw.close(). Reading it is the whole difference between "the X was
+            # pressed" and "the user asked Anki to quit"; ignoring it made the tray icon
+            # unable to exit at all while a card happened to be on screen (2026-11-06).
+            exit_flag = bool(getattr(mw, "closeEventFromAction", False))
+            forcing = forced or exit_flag
             tray = hasattr(mw, "closeEventFromAction")
             card_open = controller.review.card_on_screen()
             hiding = hide_instead_of_quit(
@@ -1669,14 +1796,14 @@ class MainWindowCloseFilter(QObject):
                 # sync timers running — stopping them here is what left Anki sitting in the
                 # tray for an hour without ever showing a card (2026-11-04). With a card up,
                 # the branch below still keeps that card visible instead of hiding it too.
-                log_runtime("main window close: tray=on forcing=%s -> background (timers kept)" %
-                            ("yes" if forcing else "no"))
+                log_runtime("main window close: tray=on exit=no -> background (timers kept)")
                 return False
             # Two restarts today needed a forced kill, and the log could not say why the
             # polite close was refused. Record the inputs to that decision.
-            log_runtime("main window close: card=%s setting=%s forcing=%s tray=%s -> %s" % (
+            log_runtime("main window close: card=%s setting=%s force=%s exit=%s tray=%s -> %s" % (
                 card_open, settings().get("hide_main_on_close", True),
-                forcing, "yes" if tray else "no", "hide" if hiding else "quit"))
+                "yes" if forced else "no", "yes" if exit_flag else "no",
+                "yes" if tray else "no", "hide" if hiding else "quit"))
             if not hiding:
                 # A real close: stop both timers first. Otherwise the scheduled popup
                 # can open a window in the middle of shutdown, or the background sync
