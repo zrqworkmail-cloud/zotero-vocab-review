@@ -39,7 +39,14 @@ for theme in ('light','dark'):
   finally: del ReviewDialog.show
   assert observations==[True],observations
   assert ctl.dialog is not old and ctl.dialog.isVisible() and old.isVisible() and ctl.dialog.window() is old and not ctl.dialog.isWindow()
-  assert old.geometry()==before,(old.geometry(),before)
+  # Height follows the new card's content in both directions (learner's decision,
+  # 2026-11-05: 「窗口双向贴合内容」). This replaces the old `old.geometry()==before`, which
+  # froze the host at whatever height the first card happened to need and left a dead band
+  # under every shorter card. Width is still pinned, and the card still fills the window.
+  assert old.width()==before.width(),(old.width(),before.width())
+  assert ctl.dialog.geometry()==old.rect(),(ctl.dialog.geometry(),old.rect())
+  assert abs(old.height()-ctl.dialog.layout().sizeHint().height())<=24,(
+      old.height(),ctl.dialog.layout().sizeHint().height())
   assert ctl.session_seen=={1} and ctl.session_words=={'maintenance'}
   assert ctl.dialog.letter_boxes[0].hasFocus()
   viewport=ctl.dialog.letter_scroll.viewport()
@@ -54,7 +61,10 @@ for theme in ('light','dark'):
   third=dict(second,card_id=3,word='prediction')
   ctl._graded(second_dialog,None,ctl.generation,(third,None));QTest.qWait(60)
   assert ctl.dialog is not second_dialog and ctl.dialog.window() is old and old.isVisible()
-  assert old.geometry()==before and ctl.session_seen=={1,2}
+  assert old.width()==before.width() and ctl.session_seen=={1,2}
+  assert ctl.dialog.geometry()==old.rect(),(ctl.dialog.geometry(),old.rect())
+  assert abs(old.height()-ctl.dialog.layout().sizeHint().height())<=24,(
+      old.height(),ctl.dialog.layout().sizeHint().height())
   current=ctl.dialog; old.resize(old.width()+10,old.height()+10);app.processEvents();assert current.geometry()==old.rect()
   ratings=[];mastered=[];current.grade=lambda _d,ease:ratings.append(ease)
   current.mastered.connect(lambda card: mastered.append(card.question['card_id']))

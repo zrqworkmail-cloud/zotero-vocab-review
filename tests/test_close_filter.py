@@ -45,7 +45,8 @@ class Event:
 QEvent = types.SimpleNamespace(Type=types.SimpleNamespace(Close=EventType(CLOSE)))
 
 
-def build(card_open, hide_enabled, visible=None, syncing=False, tray=False, forcing=False):
+def build(card_open, hide_enabled, visible=None, syncing=False, tray=False, forcing=False,
+          exiting=False):
     """The filter class pulled out of __init__.py, run against stubs."""
     stopped = []
     timer = types.SimpleNamespace(stopped=[], stop=lambda: timer.stopped.append(True))
@@ -57,7 +58,9 @@ def build(card_open, hide_enabled, visible=None, syncing=False, tray=False, forc
     mw = types.SimpleNamespace(hide=lambda: hidden.append(True))
     if tray:
         # 'Minimize to Tray 2' puts this attribute on mw and rewrites mw.closeEvent with it.
-        mw.closeEventFromAction = False
+        # Its tray-menu 退出 sets it to True and then calls mw.close(), so the value is how a
+        # close says whether it came from the X button or from an exit the user asked for.
+        mw.closeEventFromAction = bool(exiting)
     if forcing:
         mw.zvr_force_quit = True
     scope = {'QEvent': QEvent, 'mw': mw,
@@ -165,6 +168,33 @@ class CloseFilter(unittest.TestCase):
         widget, stopped, timer, hidden, mw = build(card_open=True, hide_enabled=True, tray=False)
         self.assertTrue(widget.eventFilter(object(), Event(CLOSE)))
         self.assertEqual((hidden, stopped, timer.stopped), ([True], [], []))
+
+    def test_the_tray_menu_exit_quits_even_with_a_card_on_screen(self):
+        """The tray add-on's own 退出 is a shutdown, so nothing may turn it into a hide.
+
+        The user reported 2026-11-06 that Anki could only be quit from the card: the exit
+        flag was read as "a tray is installed", never as "this close was asked for", so any
+        tray exit landed in the card-on-screen branch and just hid the main window.
+        """
+        widget, stopped, timer, hidden, mw = build(card_open=True, hide_enabled=True,
+                                                   tray=True, exiting=True)
+        event = Event(CLOSE)
+        self.assertFalse(widget.eventFilter(object(), event),
+                         'the close must reach the tray add-on so it can shut Anki down')
+        self.assertEqual(hidden, [], 'hiding the main window is what left Anki running')
+        self.assertEqual(stopped, ['review'], 'the card goes down with the app, not outliving it')
+        self.assertEqual(timer.stopped, [True])
+        self.assertTrue(getattr(mw, 'zvr_closing', False))
+
+    def test_the_tray_menu_exit_with_no_card_up_is_a_shutdown_not_a_background(self):
+        # Same flag, the other window state: the timers must still go down, or a queued card
+        # or sync tick reopens a window in the middle of the shutdown.
+        widget, stopped, timer, hidden, mw = build(card_open=False, hide_enabled=True,
+                                                   tray=True, exiting=True)
+        self.assertFalse(widget.eventFilter(object(), Event(CLOSE)))
+        self.assertEqual((stopped, timer.stopped), (['review'], [True]))
+        self.assertEqual(hidden, [])
+        self.assertTrue(mw.closeEventFromAction, 'the flag is the tray add-on\'s, not ours to clear')
 
 
 if __name__ == '__main__':

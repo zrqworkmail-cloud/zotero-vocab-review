@@ -35,6 +35,7 @@ import importlib.util
 source=os.path.abspath(os.path.join(os.path.dirname(__file__),'..','anki-global-addon','zotero_global_capture'))
 sp=importlib.util.spec_from_file_location('review_logic',os.path.join(source,'review_logic.py'));logic=importlib.util.module_from_spec(sp);sp.loader.exec_module(logic)
 sp2=importlib.util.spec_from_file_location('audio_volume',os.path.join(source,'audio_volume.py'));audio_volume=importlib.util.module_from_spec(sp2);sp2.loader.exec_module(audio_volume)
+sp3=importlib.util.spec_from_file_location('card_motion',os.path.join(source,'card_motion.py'));card_motion=importlib.util.module_from_spec(sp3);sp3.loader.exec_module(card_motion)
 review_decks=logic.review_decks
 selected_review_modes=logic.selected_review_modes
 collection_plan=logic.collection_plan
@@ -50,6 +51,7 @@ class ShortcutEdit(QLineEdit):
 path=os.path.join(source,'__init__.py')
 tree=ast.parse(open(path,encoding='utf-8').read());node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='open_settings');module=ast.Module(body=[node],type_ignores=[])
 scope=globals();scope.update(settings=lambda:dict(cfg),show_feedback=lambda *_a,**_k:None,format_shortcut=lambda *_:'Ctrl+Shift+F10',
+	card_motion=card_motion, MODE_ORDER=logic.MODE_ORDER, MODE_LABELS=logic.MODE_LABELS,
 	local_tags=local_tags,study_books=logic.study_books,study_book_id=logic.study_book_id,refresh_toolbar=lambda:None,
 	apply_sync_preference=lambda:None,
 	apply_review_volume=lambda value=None:None, volume_preview=lambda value:None,
@@ -182,8 +184,58 @@ def volume_reopens():
 open_and(volume_reopens)
 check(saved and saved[-1]['review_volume']==240,saved[-1] if saved else None)
 
+# 5. The two motion switches exist, read the saved config, and round-trip independently.
+cfg.update(review_motion_hop=True, review_motion_celebration=False)
+def motion_off_one():
+ d=dialog_now()
+ hop=d.findChild(QCheckBox,'motionHop'); pop=d.findChild(QCheckBox,'motionCelebration')
+ check(hop is not None and pop is not None,'both motion switches must exist')
+ check(hop.isChecked() and not pop.isChecked(),'the saved switches must reopen as themselves')
+ hop.click(); pop.click()
+ save_button(d).click()
+open_and(motion_off_one)
+check(saved[-1]['review_motion_hop'] is False and saved[-1]['review_motion_celebration'] is True,
+      'flipping both must write both, got %s' % saved[-1])
+cfg.update(saved[-1]); saved.clear()
+def motion_reads_back():
+ d=dialog_now()
+ check(not d.findChild(QCheckBox,'motionHop').isChecked(),'the hop switch must stay off')
+ check(d.findChild(QCheckBox,'motionCelebration').isChecked(),'the celebration switch must stay on')
+ save_button(d).click()
+open_and(motion_reads_back)
+
+# The old three-way radio must be gone, or the page has two controls for one decision.
+def no_radio():
+ d=dialog_now()
+ labels=[x.text() for x in d.findChildren(QRadioButton)]
+ check(not any(t in ('全部动效','只要庆祝','关闭动效') for t in labels),
+       'the retired 卡片动效 radio must not come back, got %s' % [t for t in labels if '动效' in t or '庆祝' in t])
+ save_button(d).click()
+open_and(no_radio)
+check('review_motion' not in saved[-1],'saving must not keep writing the retired mode key')
+
+# 6. 答案面例句开关：配置里没有这个键时必须默认"显示"（老配置不该被静默改掉），取消勾选后
+#    要存回 False，并且重开对话框读回的是关掉的样子。
+cfg.pop('review_show_example', None)
+def example_switch_off():
+	d=dialog_now()
+	boxes=[x for x in d.findChildren(QCheckBox) if '答案面显示例句' in x.text()]
+	check(len(boxes)==1,'the page must carry exactly one 例句 switch, got %d' % len(boxes))
+	check(boxes and boxes[0].isChecked(),'a config written before this setting must reopen showing examples')
+	if boxes: boxes[0].click()
+	save_button(d).click()
+open_and(example_switch_off)
+check(saved[-1].get('review_show_example') is False,'unchecking must write False, got %r' % saved[-1].get('review_show_example'))
+cfg.update(saved[-1]); saved.clear()
+def example_switch_reads_back():
+	d=dialog_now()
+	boxes=[x for x in d.findChildren(QCheckBox) if '答案面显示例句' in x.text()]
+	check(boxes and not boxes[0].isChecked(),'the saved off state must read back on reopen')
+	save_button(d).click()
+open_and(example_switch_reads_back)
+
 if failures:
  print('FAIL')
  for f in failures: print('  -', f)
  sys.exit(1)
-print('Qt: the book list is single-select, reads the collection, migrates the legacy book, and never offers a missing one')
+print('Qt: 词书单选且只列真实存在的书、旧词书能迁移；音量旋钮回读；两个动效开关各自存回、旧的三档单选钮已消失')

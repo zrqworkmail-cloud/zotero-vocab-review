@@ -45,11 +45,23 @@ def spell_right(dialog):
     return dialog
 
 
+def evidence(dialog):
+    """Where the accounting lives now.
+
+    On 2026-11-05 the learner asked for the status row to stop eating two lines, so the
+    counts moved into its tooltip and the row keeps only the suggestion and the keys. These
+    checks follow the evidence rather than asserting on a string nobody can see any more.
+    """
+    return dialog.status.toolTip()
+
+
 # 1. Baseline of the user's rule: 一次性写对、没碰提示 → the card recommends Mastered.
 dialog = spell_right(card('characteristic'))
 assert dialog.enter_mastered is True and dialog.enter_ease == 4, (dialog.enter_mastered, dialog.enter_ease)
-assert '无提示' in dialog.status.text(), dialog.status.text()
-assert '建议“Mastered”' in dialog.status.text(), dialog.status.text()
+# 「无提示」 is evidence, not a zero count, so it still exists — but the row is short now
+# and the evidence lives in its tooltip (learner's choice, 2026-11-05).
+assert '无提示' in dialog.status.toolTip(), dialog.status.toolTip()
+assert '建议 Mastered' in dialog.status.text(), dialog.status.text()
 
 # 2. One listen is nearly free: 用户点名它应当仍然建议 Easy, and it is no longer Mastered.
 dialog = card('characteristic')
@@ -57,7 +69,8 @@ dialog.hear_hint(['characteristic'])
 spell_right(dialog)
 assert dialog.enter_mastered is False, 'a hint, however light, is not a blind recall'
 assert dialog.enter_ease == 4, ('one audio hint stays Easy', dialog.enter_ease)
-assert '发音提示 1 次' in dialog.status.text() and '建议“Easy”' in dialog.status.text(), dialog.status.text()
+assert '发音提示 1 次' in evidence(dialog), evidence(dialog)
+assert '建议 Easy' in dialog.status.text(), dialog.status.text()
 
 # 3. Two listens drop to Good, three to Hard.
 for presses, expected in ((2, 3), (3, 2), (5, 2)):
@@ -74,14 +87,14 @@ dialog = card('characteristic')
 dialog.add_hint()
 spell_right(dialog)
 assert dialog.enter_ease == 3, ('first letter of a long word', dialog.enter_ease)
-assert '字母提示 1/14' in dialog.status.text() and '31%' in dialog.status.text(), dialog.status.text()
-assert '建议“Good”' in dialog.status.text(), dialog.status.text()
+assert '字母提示 1/14' in evidence(dialog) and '31%' in evidence(dialog), evidence(dialog)
+assert '建议 Good' in dialog.status.text(), dialog.status.text()
 
 dialog = card('drive')
 dialog.add_hint()
 spell_right(dialog)
 assert dialog.enter_ease == 2, ('first letter of a short word', dialog.enter_ease)
-assert '44%' in dialog.status.text(), dialog.status.text()
+assert '44%' in evidence(dialog), evidence(dialog)
 
 # 5. More letters given away can only make it worse, never better.
 shares = []
@@ -98,14 +111,14 @@ dialog = card('characteristic')
 dialog.show_example_hint('He had a characteristic smile.')
 spell_right(dialog)
 assert dialog.enter_ease == 2, ('example hint', dialog.enter_ease)
-assert '释义/例句提示 1 次' in dialog.status.text(), dialog.status.text()
+assert '释义/例句提示 1 次' in evidence(dialog), evidence(dialog)
 
 dialog = card('characteristic')
 dialog.hear_hint(['characteristic'])
 dialog.letter_boxes[0].setText('x')          # 打错一个字母，随后自己改回来
 dialog.letter_boxes[0].setText('c')
 spell_right(dialog)
-assert (dialog.incorrect_letters, dialog.failed_attempts) == (1, 0), dialog.status.text()
+assert (dialog.incorrect_letters, dialog.failed_attempts) == (1, 0), evidence(dialog)
 assert dialog.enter_ease == 3, ('a corrected slip costs Good, not Hard', dialog.enter_ease)
 
 dialog = card('characteristic')
@@ -128,6 +141,6 @@ dialog.show(); QTest.qWait(60); app.processEvents()
 dialog.hear_hint(['develop'])
 dialog.reveal(True)
 assert dialog.enter_ease == 2, ('choice card with a hint keeps Hard', dialog.enter_ease)
-assert '提示 1 次' in dialog.status.text(), dialog.status.text()
+assert '提示 1 次' in evidence(dialog), evidence(dialog)
 
 print('Qt: 一次发音=Easy、字母提示按位置加权、释义/例句仍是 Hard 地板，其他题型不变')

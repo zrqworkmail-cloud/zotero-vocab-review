@@ -34,7 +34,7 @@ scope.update(settings=lambda: dict(cfg), mw=aqt.mw, controller=types.SimpleNames
     setup_cet6_books=lambda: None, browse_cet6_book=lambda key: None, open_cet6_listening=lambda: None,
     study_books=lambda c: [{'id':'cet6_core','name':'六级核心'},{'id':'cet6_full','name':'六级全表'}],
     study_book_id=lambda c: 'cet6_core', book_card_count=lambda book: 439,
-    choose_study_book=lambda key: None)
+    choose_study_book=lambda key: None, write_quality_report=lambda: None)
 for name in wanted:
     node=next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name==name)
     exec(compile(ast.Module(body=[node], type_ignores=[]), source, 'exec'), scope)
@@ -54,6 +54,8 @@ menu=[action.menu() for action in top if action.text()=='单词随身复习'][0]
 daily=[action.text() for action in menu.actions() if action.text()]
 assert daily[:3]==['立即弹出一张','切换词书','六级听力：本地真题与模拟'], daily
 assert any('词书与词表管理' in text for text in daily), daily
+# The audit entry belongs with the daily actions, and its name has to say what it will not do.
+assert any('复习质量报告' in text and '只读' in text for text in daily),     daily
 assert not any('浏览核心词汇' in text or '补充缺失词汇' in text for text in daily),     'the maintenance actions must not sit next to the daily ones: %s' % daily
 
 manage=[action.menu() for action in menu.actions() if action.text()=='词书与词表管理'][0]
@@ -69,4 +71,4 @@ book_menu=[action.menu() for action in menu.actions() if action.text()=='切换�
 book_menu.aboutToShow.emit()
 assert [action.text() for action in book_menu.actions()]==['六级核心　439 张','六级全表　439 张'],     [action.text() for action in book_menu.actions()]
 assert book_menu.actions()[0].isChecked(), 'the current book must read as chosen'
-print('Qt: Tools carries two plug-in entries, the daily three up front, the seven maintenance items one level down')
+print('Qt: Tools carries two plug-in entries, the daily three plus the read-only report up front, the seven maintenance items one level down')

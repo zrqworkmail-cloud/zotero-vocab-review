@@ -40,7 +40,13 @@ class FakeAnki:
             q = params['query']
             if 'cid:' in q:
                 cid = int(q.split('cid:')[1].split()[0])
-                return [cid] if cid in self.cards else []
+                if cid not in self.cards:
+                    return []
+                if 'is:learn' in q:
+                    # Anki's own way of saying "still in its first steps"; the fake answers it
+                    # from the queue column, the way the real scheduler does.
+                    return [cid] if self.cards[cid]['queue'] == 1 else []
+                return [cid]
             if 'is:due' in q:
                 return [1] if self.stats['review_count'] else []
             if 'is:new' in q:
@@ -88,6 +94,7 @@ class ReviewLogicTests(unittest.TestCase):
 
     def test_book_card_can_be_graded_from_any_deck_it_spans(self):
         api = FakeAnki()
+        api.stats['new_count'] = 0   # this test is about cross-deck grading, not the queue order
         api.cards[1]['deckName'] = 'CET'
         def scoped_api(action, params):
             if action == 'getDeckStats':
@@ -131,14 +138,121 @@ class ReviewLogicTests(unittest.TestCase):
         self.assertFalse(logic.plan_limits_new({'review_plan_mode': 'fixed'}))
 
     def test_end_of_session_reason_names_the_real_cause(self):
-        spent = {'new_remaining': 0, 'due': 0}
-        self.assertIn('没有到期复习', logic.end_of_session_reason(spent, True))
-        self.assertIn('到期复习词', logic.end_of_session_reason({'new_remaining': 0, 'due': 3}, True))
-        # In fixed mode the plan is not the cause, so it must not be blamed for it.
-        fixed = logic.end_of_session_reason(spent, False)
-        self.assertIn('当日新词额度', fixed)
-        self.assertNotIn('计划已完成', fixed)
-        self.assertIn('当日新词额度', logic.end_of_session_reason(None, True))
+        # The catch-all used to guess two causes in one sentence and was wrong for the case
+        # the learner actually hit: a finished book. Each branch must name its own number.
+        book = '六级核心'
+        finished = {'new_remaining': 0, 'due': 0, 'remaining_new_total': 0, 'available_new': 0}
+        said = logic.end_of_session_reason(finished, False, book, elsewhere_due=38)
+        self.assertIn('已学完', said)
+        self.assertIn(book, said)
+        self.assertIn('38 张到期卡不在所选词组内', said)
+        self.assertIn('再勾一本词组', said)
+        self.assertNotIn('可能是', said)
+        self.assertNotIn('已选题型', said)
+        self.assertNotIn('挂起', said, 'a zero is never printed')
+
+        # 「已学完」also has to say what is parked: on 2026-11-06 the book reported nothing left
+        # while 247 cards sat in 挂起, and the only advice on offer was "勾一本词组".
+        parked = logic.end_of_session_reason(finished, False, book, suspended=247)
+        self.assertIn('247 张被你挂起', parked)
+        self.assertIn('已学完', parked)
+
+        capped = {'new_remaining': 0, 'due': 0, 'remaining_new_total': 468, 'available_new': 0}
+        said = logic.end_of_session_reason(capped, False, book)
+        self.assertIn('468 张新词', said)
+        self.assertIn('明天', said)
+
+        planned = logic.end_of_session_reason({'new_remaining': 0, 'due': 3,
+                                               'remaining_new_total': 0, 'available_new': 0},
+                                              True, book)
+        self.assertIn('新词计划已完成', planned)
+        self.assertIn('到期复习', planned)
+        planned_empty = logic.end_of_session_reason({'new_remaining': 0, 'due': 0,
+                                                     'remaining_new_total': 0,
+                                                     'available_new': 0}, True, book)
+        self.assertIn('也没有到期复习词', planned_empty)
+
+        types = logic.end_of_session_reason({'new_remaining': 5, 'due': 0,
+                                             'remaining_new_total': 40, 'available_new': 5},
+                                            False, book,
+                                            mode_labels=('例句填空', '听音拼写'))
+        self.assertIn('例句填空、听音拼写', types)
+        self.assertIn('换题型', types)
+
+        self.assertIn('无法判断', logic.end_of_session_reason(None, True))
+
+    def test_the_parked_count_is_counted_inside_the_selection_only_by_reading(self):
+        seen = []
+
+        def api(action, params):
+            seen.append((action, params['query']))
+            return [7, 8, 9]
+        self.assertEqual(logic.book_suspended(api, dict(CFG)), 3)
+        self.assertEqual([action for action, _query in seen], ['findCards'],
+                         'one read-only search, nothing else')
+        self.assertTrue(seen[0][1].startswith('is:suspended'), seen[0][1])
+
+        def broken(action, params):
+            raise RuntimeError('Anki is busy')
+        self.assertEqual(logic.book_suspended(broken, dict(CFG)), 0,
+                         'a missing number must not eat the end-of-session sentence')
+
+    def test_a_group_mixes_old_cards_in_by_a_fixed_share(self):
+        # Replaces "new words come before due reviews" (2026-11-05). Measured live on
+        # 2026-11-06: 365 new cards still allowed, 250 cards sitting in Anki's learning
+        # steps, 27 mature reviews -- under the old rule the learning steps waited behind
+        # roughly 37 groups, turning a 10-minute step into tomorrow. The learner chose a
+        # fixed share per group, so slots 0-1 of ten are old cards and the rest stay new.
+        api = FakeAnki()
+        opening = logic.prepare_question(api, dict(CFG, _review_group=(0, 10)),
+                                         'typing', random.Random(2))
+        self.assertEqual(opening['kind'], 'due')
+        middle = logic.prepare_question(api, dict(CFG, _review_group=(3, 10)),
+                                        'typing', random.Random(2))
+        self.assertEqual(middle['kind'], 'new')
+        # Nothing in the collection changed: the old pile is one card deep here, so the
+        # second promised slot must fall back to new rather than invent a due card.
+        second = logic.prepare_question(api, dict(CFG, _review_group=(1, 10)),
+                                        'typing', random.Random(2))
+        self.assertEqual(second['kind'], 'new',
+                         'a promised slot must not outrun the due pile that exists')
+        ungrouped = logic.prepare_question(api, CFG, 'typing', random.Random(2))
+        self.assertEqual(ungrouped['kind'], 'new',
+                         'without group info the selector must not force an old card')
+
+    def test_due_only_still_reaches_the_due_queue(self):
+        api = FakeAnki()
+        due_only = logic.prepare_question(api, dict(CFG, _review_exclude_cards={2, 3, 4, 5}),
+                                          'typing', random.Random(2), due_only=True)
+        self.assertEqual(due_only['kind'], 'due',
+                         'due_only must still reach the due queue, not skip the whole loop')
+
+    def test_the_eyebrow_names_the_queue_the_card_is_actually_in(self):
+        # 2026-11-06: of the 253 cards due in 《六级全表》, 252 were still in Anki's first
+        # learning steps, and every one of them read 到期复习 — which is how the user ended up
+        # asking whether they had really studied a word they had seen once, yesterday.
+        self.assertEqual(logic.study_state_label('new', False), '新词')
+        self.assertEqual(logic.study_state_label('due', True), '刚学过')
+        self.assertEqual(logic.study_state_label('due', False), '到期复习')
+        for label in ('新词', '刚学过', '到期复习'):
+            self.assertIn(label, logic.STUDY_STATE_NOTES, 'every eyebrow label needs a tooltip line')
+
+    def test_a_card_reports_whether_it_is_still_in_its_learning_steps(self):
+        api = FakeAnki()
+        self.assertFalse(logic.card_is_learning(api, 1), 'card 1 sits in the review queue')
+        api.cards[1]['queue'] = 1
+        self.assertTrue(logic.card_is_learning(api, 1))
+
+        def busy(action, params):
+            raise RuntimeError('Anki is busy')
+        self.assertFalse(logic.card_is_learning(busy, 1), 'a label is not worth losing the card')
+
+    def test_the_question_carries_the_learning_flag_the_eyebrow_reads(self):
+        api = FakeAnki()
+        due = logic.prepare_question(api, dict(CFG, _review_exclude_cards={2, 3, 4, 5}),
+                                     'typing', random.Random(2), due_only=True)
+        self.assertEqual(due['kind'], 'due')
+        self.assertFalse(due['learning'], 'a graduated card must read 到期复习, not 刚学过')
 
     def test_exam_labels_are_based_on_actual_wordlist_membership(self):
         labels = logic.exam_word_labels('increases')
@@ -160,6 +274,7 @@ class ReviewLogicTests(unittest.TestCase):
 
     def test_cet_core_prefers_core_within_due_cards(self):
         api = FakeAnki()
+        api.stats['new_count'] = 0   # the core-preference rule is about which due card, not the queue order
         api.cards[1]['fields']['Front']['value'] = 'increase'
         self.assertTrue(logic.is_core_word('increases'))
         q = logic.prepare_question(api, dict(CFG, review_core_enabled=True), 'typing', random.Random(1))
@@ -303,6 +418,7 @@ class ReviewLogicTests(unittest.TestCase):
 
     def test_a_card_outside_the_book_cannot_be_graded_from_it(self):
         api = FakeAnki()
+        api.stats['new_count'] = 0   # subject: narrowing the book must refuse, not queue order
         api.cards[1]['deckName'] = 'Other'
         original = api.__call__
         def lookup(action, params):
@@ -342,6 +458,7 @@ class ReviewLogicTests(unittest.TestCase):
 
     def test_spelling_question_uses_unambiguous_lemma_without_changing_card(self):
         fake = FakeAnki()
+        fake.stats['new_count'] = 0   # the lemma check must run on the card it actually picked
         fake.cards[1]['fields']['Front']['value'] = 'leveraging'
         question = logic.prepare_question(fake, CFG, 'typing', random.Random(1))
         self.assertEqual((question['word'], question['source_form'], question['answer_form']), ('leverage', 'leveraging', 'leverage'))
@@ -370,6 +487,8 @@ class ReviewLogicTests(unittest.TestCase):
 
     def test_collection_plan_deduplicates_overlapping_decks(self):
         def api(action, params):
+            if action == 'deckNames':
+                return ['Literature', 'CET']
             if action == 'getDeckStats':
                 return deck_stats(params['decks'][0])
             self.assertEqual(action, 'findCards')
@@ -384,6 +503,11 @@ class ReviewLogicTests(unittest.TestCase):
 
     def test_collection_plan_separates_new_and_review_progress(self):
         def api(action, params):
+            if action == 'deckNames':
+                # These two stubs used to pass only because an earlier test had written
+                # `_book_decks` into the shared module CFG. Anki always answers deckNames,
+                # so the stub has to as well.
+                return ['Literature', 'CET']
             if action == 'getDeckStats':
                 return deck_stats(params['decks'][0])
             query = params['query']
@@ -661,7 +785,9 @@ class ReviewLogicTests(unittest.TestCase):
         self.assertGreater(logic._weight(unrelated, CFG, {'method': 2}), logic._weight(unrelated, CFG, {}))
         self.assertEqual(logic._weight(unrelated, CFG, {'other': 2}), 1)
 
-    def test_additional_deck_due_before_primary_new(self):
+    def test_additional_deck_new_before_primary_due(self):
+        # Reversed on 2026-11-05 at the learner's request: today's new words first, due
+        # reviews after them, so a day of 六级词汇 is not interrupted by old cards.
         api = FakeAnki()
         original = api.__call__
         api.cards[1]['deckName'] = 'CET'
@@ -672,9 +798,12 @@ class ReviewLogicTests(unittest.TestCase):
             return original(action, params)
         cfg = dict(CFG, study_book='cet')
         question = logic.prepare_question(lookup, cfg, 'typing', random.Random(2))
-        self.assertEqual(question['card_id'], 1)
-        self.assertEqual(question['review_deck'], 'CET')
-        self.assertEqual(question['kind'], 'due')
+        self.assertEqual(question['kind'], 'new')
+        # With the new queue spent, the due card in the additional deck is next.
+        spent = logic.prepare_question(lookup, dict(cfg, _review_exclude_cards={2, 3, 4, 5}),
+                                       'typing', random.Random(2))
+        self.assertEqual(spent['kind'], 'due')
+        self.assertEqual(spent['review_deck'], 'CET')
     def test_reverse_choices_and_cloze_use_correct_content(self):
         api = FakeAnki()
         api.cards[1]['fields']['例句'] = {'value': 'This notion is useful.'}
@@ -690,11 +819,10 @@ class ReviewLogicTests(unittest.TestCase):
         question = logic.prepare_question(api, dict(CFG, _review_exclude_cards={1}), 'typing', random.Random(2))
         self.assertNotEqual(question['card_id'], 1)
 
-    def test_due_card_takes_priority_and_choices_are_distinct(self):
+    def test_new_card_takes_priority_and_choices_are_distinct(self):
         api = FakeAnki()
         question = logic.prepare_question(api, CFG, 'choice', random.Random(3))
-        self.assertEqual(question['card_id'], 1)
-        self.assertEqual(question['kind'], 'due')
+        self.assertEqual(question['kind'], 'new')
         self.assertEqual(len(question['options']), 4)
         self.assertEqual(len(set(question['options'])), 4)
         self.assertIn('概念', question['options'])
@@ -752,7 +880,7 @@ class ReviewLogicTests(unittest.TestCase):
     def test_a_changed_card_is_never_graded_from_a_stale_popup(self):
         api = FakeAnki()
         question = logic.prepare_question(api, CFG, 'typing', random.Random(2))
-        api.cards[1]['reps'] += 1
+        api.cards[question['card_id']]['reps'] += 1
         with self.assertRaisesRegex(ValueError, '变化'):
             logic.submit_review(api, CFG, question, 3)
         self.assertEqual(api.answered, [])
@@ -770,7 +898,7 @@ class ReviewLogicTests(unittest.TestCase):
         question = logic.prepare_question(api, CFG, 'typing', random.Random(2))
         self.assertEqual(api.answered, [])
         logic.submit_review(api, CFG, question, 3)
-        self.assertEqual(api.answered, [{'cardId': 1, 'ease': 3}])
+        self.assertEqual(api.answered, [{'cardId': question['card_id'], 'ease': 3}])
         with self.assertRaisesRegex(ValueError, '变化'):
             logic.submit_review(api, CFG, question, 3)
         self.assertEqual(len(api.answered), 1)

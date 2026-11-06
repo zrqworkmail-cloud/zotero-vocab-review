@@ -61,8 +61,9 @@ short_rows = [row.height() for row in short.choice_buttons]
 assert tall_rows == short_rows, ('同一道题，窗口高低不该改变选项高度', tall_rows, short_rows)
 assert max(tall_rows) <= 45, tall_rows
 
-# 4. 换卡时窗口几何不许跳（windows-next-card-transition.py 钉过的既定行为）：
-#    修选项不能以"收缩宿主窗口"为代价。
+# 4. 内嵌卡换卡时：窗口高度双向贴合内容（用户 2026-11-05 决定「窗口双向贴合内容」，
+#    取代旧的"宿主不许动"），但两件事不许坏——宽度不动，内嵌卡必须始终铺满宿主，
+#    否则就是 §9.32 的重影。
 host = card('judgment', ['正确', '错误'], height=680)
 before = host.geometry()
 inner = card('judgment', ['正确', '错误'])
@@ -74,8 +75,12 @@ inner.show()
 QTest.qWait(60); app.processEvents(); QTest.qWait(60)
 inner.fit_card_height()
 QTest.qWait(60); app.processEvents()
-assert host.geometry() == before, ('内嵌卡的收缩只许动自己，不许动宿主窗口',
-                                   host.geometry(), before)
+assert host.width() == before.width(), ('双向贴合只许动高度，不许动宽度',
+                                        host.width(), before.width())
+assert host.height() < before.height(), ('内容更矮时宿主必须收，余量就是那条空隙',
+                                          host.height(), before.height())
+assert abs(host.height() - inner.layout().sizeHint().height()) <= 24, (
+    host.height(), inner.layout().sizeHint().height())
 assert inner.geometry() == host.rect(), ('内嵌卡必须铺满它的窗口，否则就是重影',
                                           inner.geometry(), host.rect())
 

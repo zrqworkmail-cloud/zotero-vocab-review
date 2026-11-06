@@ -48,7 +48,10 @@ assert dialog.width()==width_before, \
     'the rating row must not widen the card when it appears: %d -> %d' % (width_before, dialog.width())
 texts=[dialog.grade_widget.layout().itemAt(i).widget().text() for i in range(dialog.grade_widget.layout().count())]
 assert texts==['A. Again','B. Hard','C. Good','D. Easy','E. Mastered'],texts
-assert '建议“Mastered”' in dialog.status.text(),dialog.status.text()
+# 2026-11-05: the row is one short line now — it names the suggestion and the key, the
+# counts moved to its tooltip. What must still be true is that the line says Mastered.
+assert '建议 Mastered' in dialog.status.text(),dialog.status.text()
+assert '无提示' in dialog.status.toolTip(),dialog.status.toolTip()
 assert '按 A' in dialog.grade_buttons[0].toolTip(),dialog.grade_buttons[0].toolTip()
 
 # A wrong answer collapses the row, and the letters have to name what is actually there.

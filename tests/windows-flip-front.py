@@ -47,17 +47,26 @@ front=[w for w in (dialog.question_label, dialog.meaning_heading, getattr(dialog
 assert not any(w.isVisible() for w in front), 'the answer face hides the prompt'
 width_before, top_before = dialog.width(), dialog.y()
 
-# 3. F shows the front again, without un-revealing or grading anything.
-QTest.keyClick(dialog, Qt.Key.Key_F);app.processEvents();QTest.qWait(80)
-assert dialog.showing_front, 'F must report the face it is on'
+# 3. Shift+F shows the front again, without un-revealing or grading anything. Plain f must
+#    then type into the spelling box: until 2026-11-06 the flip sat on bare F, and the probe
+#    showed the letter being eaten — the face flipped back and nothing was typed.
+QTest.keyClick(dialog, Qt.Key.Key_F, Qt.KeyboardModifier.ShiftModifier);app.processEvents();QTest.qWait(80)
+assert dialog.showing_front, 'Shift+F must report the face it is on'
 assert all(w.isVisible() for w in front), [ (w.objectName(), w.isVisible()) for w in front ]
 assert dialog.letter_boxes and dialog.letter_scroll.isVisible(), 'the typed letters belong to the front'
 assert not dialog.grade_widget.isVisible() and not dialog.result_label.isVisible(),    'no rating row on the front: A-E would fire while the user is only reading'
 assert not dialog.book_chip.isVisible(), 'the word-list pills describe the answer'
 assert dialog.answer_shown and not graded, (dialog.answer_shown, graded)
 
-# 4. F again returns to the answer, same width, same top edge, cursor back on the row.
-QTest.keyClick(dialog, Qt.Key.Key_F);app.processEvents();QTest.qWait(80)
+# 3b. The letter that used to be stolen now reaches the box, and the face does not move.
+dialog.letter_boxes[0].setFocus();app.processEvents();QTest.qWait(40)
+QTest.keyClick(dialog.letter_boxes[0], Qt.Key.Key_F);app.processEvents();QTest.qWait(40)
+assert dialog.letter_boxes[0].text().upper()=='F',    'plain f must type on the flipped-back front: %r' % [b.text() for b in dialog.letter_boxes]
+assert dialog.showing_front, 'typing a letter must not flip the card back to the answer'
+dialog.letter_boxes[0].setText('t');dialog.letter_boxes[0].textChanged.emit('t');app.processEvents()
+
+# 4. Shift+F again returns to the answer, same width, same top edge, cursor back on the row.
+QTest.keyClick(dialog, Qt.Key.Key_F, Qt.KeyboardModifier.ShiftModifier);app.processEvents();QTest.qWait(80)
 assert not dialog.showing_front
 assert dialog.grade_widget.isVisible() and dialog.result_label.isVisible()
 assert dialog.width()==width_before, (dialog.width(), width_before)
@@ -84,22 +93,36 @@ inner._embedded=True
 inner.setParent(host, Qt.WindowType.Widget)
 inner.setGeometry(host.rect())
 host._embedded_dialog=inner
+# Mirror what the controller actually does at handover: the outgoing card's widgets are
+# hidden. Left visible, the host's own layout would set a floor on its height and the
+# shrink being tested here could never happen — that is a test artefact, not behaviour.
+for widget in host.findChildren(QWidget):
+    if widget is not inner and not inner.isAncestorOf(widget):
+        widget.hide()
 inner.show();QTest.qWait(60);app.processEvents();QTest.qWait(60)
 inner.reveal(True);QTest.qWait(60);app.processEvents()
 window_before=host.geometry()
-QTest.keyClick(inner, Qt.Key.Key_F);QTest.qWait(60);app.processEvents();QTest.qWait(60)
-assert inner.showing_front, 'F must work on the embedded card too'
-assert host.geometry()==window_before, (host.geometry(), window_before)
-assert inner.geometry()==host.rect(), (inner.geometry(), host.rect())
+QTest.keyClick(inner, Qt.Key.Key_F, Qt.KeyboardModifier.ShiftModifier);QTest.qWait(60);app.processEvents();QTest.qWait(60)
+assert inner.showing_front, 'Shift+F must work on the embedded card too'
+# Height follows whichever face is up (learner's decision, 2026-11-05); width and the
+# card-fills-the-window invariant are the parts that must not move — the second is what
+# made the front face a pile of overlapping pixels on the real machine.
+assert host.width() == window_before.width(), (host.width(), window_before.width())
+assert inner.geometry() == host.rect(), (inner.geometry(), host.rect())
+assert abs(host.height() - inner.layout().sizeHint().height()) <= 24, (
+    host.height(), inner.layout().sizeHint().height(), 'the front face is not fully inside')
 assert not inner.grade_widget.isVisible() and not inner.result_label.isVisible()
 assert inner.question_label.isVisible()
-QTest.keyClick(inner, Qt.Key.Key_F);QTest.qWait(60);app.processEvents();QTest.qWait(60)
+QTest.keyClick(inner, Qt.Key.Key_F, Qt.KeyboardModifier.ShiftModifier);QTest.qWait(60);app.processEvents();QTest.qWait(60)
 assert not inner.showing_front and inner.grade_widget.isVisible()
-assert host.geometry()==window_before
+assert host.width() == window_before.width(), (host.width(), window_before.width())
+assert inner.geometry() == host.rect(), (inner.geometry(), host.rect())
+assert abs(host.height() - inner.layout().sizeHint().height()) <= 24, (
+    host.height(), inner.layout().sizeHint().height())
 host.close();app.processEvents()
 
 # 7. Esc on the front still ends the card without rating it, and does not rate silently.
-QTest.keyClick(dialog, Qt.Key.Key_F);app.processEvents();QTest.qWait(60)
+QTest.keyClick(dialog, Qt.Key.Key_F, Qt.KeyboardModifier.ShiftModifier);app.processEvents();QTest.qWait(60)
 dialog.reject();app.processEvents();QTest.qWait(60)
 assert not graded, 'leaving the front must not answer the card'
-print('Qt: F looks at the question again without un-revealing, grading, resizing or reopening')
+print('Qt: Shift+F looks at the question again without un-revealing, grading, resizing or reopening, and plain f types')

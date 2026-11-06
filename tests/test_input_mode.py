@@ -50,6 +50,29 @@ class InputModeTests(unittest.TestCase):
         mode.restore()
         self.assertEqual(imm.writes, [False])
 
+    def test_the_module_imports_without_pyqt(self):
+        # The IMM32 half has to stay testable without a Qt install, so the Qt flag is
+        # resolved lazily inside the helpers. Importing PyQt6 at module scope here would
+        # make the pure suite depend on the Anki bundle.
+        self.assertIn('ReviewInputMode', dir(module))
+        self.assertTrue(callable(module.make_latin_only))
+        self.assertTrue(callable(module.is_latin_only))
+        self.assertNotIn('PyQt6', str(getattr(module, '__dict__', {}).keys()))
+
+
+class WhichLeverIsWhich(unittest.TestCase):
+    """Recorded so nobody re-adds the hint as if it were the fix."""
+
+    def test_the_imm_flag_is_documented_as_a_legacy_best_effort(self):
+        # Measured on this machine: 微软拼音 is TSF-only, ImmGetOpenStatus answers False even
+        # in Chinese mode, and ImmSetOpenStatus changes nothing. Keeping the call is fine for
+        # other machines; keeping it as *the* fix is what left the learner typing into
+        # candidates.
+        doc = path.read_text(encoding='utf-8')
+        self.assertIn('legacy-IME best effort', doc)
+        self.assertIn('WA_InputMethodEnabled', doc)
+        self.assertIn('make_latin_only', doc)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -28,11 +28,20 @@ for theme in ('dark','light'):
  spoken=[]
  ReviewDialog.speak_many=lambda self,texts: spoken.extend(texts) or True
  d=ReviewDialog(q,'center',lambda *_:None,{'review_auto_word':False,'review_theme':theme});d.show();QTest.qWait(60)
- assert spoken==['differ'] and d.listening_explanation.isVisible()
- assert '隐藏' in d.listening_explanation.text() and '释义提示' in d.listening_explanation.text()
+ assert spoken==['differ'], (theme, spoken)
+ # What tells the learner the word is hidden used to be a sentence naming the button
+ # (「点击下方“释义提示”查看中文」). The row itself says it now, so the sentence is gone --
+ # pinned here so it cannot come back as a third line of prose.
+ assert not any('点击下方' in (label.text() or '') for label in d.findChildren(QLabel)
+                if label.isVisible()), (theme, 'the pointer sentence should stay deleted')
+ assert '听写题' in d.prompt_label.text(), (theme, d.prompt_label.text())
+ aids=[button.text() for button in d.findChildren(QPushButton) if button.objectName()=='aid'
+       and button.isVisible() and button is not d.later]
+ assert '释义' in aids, (theme, aids)
+ assert d.phonetic_hint_button is None, (theme, 'this note has no 音标 field')
  assert not d.question_label.isVisible()
  d.meaning_hint_button.click();app.processEvents()
- assert not d.listening_explanation.isVisible() and d.question_label.isVisible() and d.hint_uses==1
+ assert d.question_label.isVisible() and d.hint_uses==1
  assert 'differ' not in d.question_label.text().lower()
  d.close();app.processEvents()
 print('listening instructions, answer masking, hint and autoplay passed')

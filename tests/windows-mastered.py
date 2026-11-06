@@ -73,7 +73,7 @@ QTest.qWait(60);app.processEvents();QTest.qWait(60)
 spelling=clean.dialog
 spelling.reveal(True);app.processEvents();QTest.qWait(60)
 assert spelling.enter_mastered,'a clean typing answer must recommend mastering'
-assert '建议“Mastered”' in spelling.status.text(),spelling.status.text()
+assert '建议 Mastered' in spelling.status.text(),spelling.status.text()
 assert spelling.mastered_button.objectName()=='suggestMastered',spelling.mastered_button.objectName()
 assert not any(button.objectName()=='suggest' for button in spelling.grade_buttons),\
     'Easy must not look recommended while Mastered is'
@@ -94,7 +94,7 @@ choice=ctl3.dialog
 choice.reveal(True);app.processEvents();QTest.qWait(60)
 assert choice.enter_mastered and choice.answer_seconds is not None and choice.answer_seconds <= 3.0, \
     (choice.enter_mastered, choice.answer_seconds)
-assert '用时' in choice.status.text(),choice.status.text()
+assert '用时' in choice.status.toolTip(),choice.status.toolTip()
 choice.close();app.processEvents()
 ctl4=controller(choice_notes, [])
 ctl4._prepared(dict(card(92,'active','积极的'), mode='choice', options=['被动的','积极的','中性的','混合的']),
@@ -185,7 +185,7 @@ for box,char in zip(second.letter_boxes,'difficult'): box.setText(char)
 second.check_input();app.processEvents();QTest.qWait(60)
 assert second.answer_shown and second.enter_ease==4,(second.answer_shown,second.enter_ease)
 assert second.enter_mastered,'a flawless spelling must recommend mastering'
-assert '建议“Mastered”' in second.status.text(),second.status.text()
+assert '建议 Mastered' in second.status.text(),second.status.text()
 assert not [n for n in notes if '保存' in n or '没有' in n],notes
 ctl.stop();app.processEvents()
 rp.prepare_question=real_prepare

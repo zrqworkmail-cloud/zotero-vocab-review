@@ -39,6 +39,14 @@ newness=ReviewDialog(dict(q,kind='new'),'center',lambda *_:None,{'review_auto_wo
 newness.show();app.processEvents()
 header=next(x for x in newness.findChildren(QLabel) if 'VOCABULARY' in x.text())
 assert header.text()=='VOCABULARY  ·  六级全表  ·  0/4803  ·  新词',header.text()
+# A due card that never graduated is yesterday's mistake, not an old review word: 252 of the
+# 253 cards due in this book were labelled 到期复习, which is what made the user ask whether
+# they had ever studied a word at all.
+learning=ReviewDialog(dict(q,learning=True),'center',lambda *_:None,{'review_auto_word':False,'study_book':'cet6_full','_book_progress':(0,4803)},'1 / 3')
+learning.show();app.processEvents()
+header=next(x for x in learning.findChildren(QLabel) if 'VOCABULARY' in x.text())
+assert header.text()=='VOCABULARY  ·  六级全表  ·  0/4803  ·  刚学过',header.text()
+assert '学习步长' in header.toolTip(),header.toolTip()
 legacy=ReviewDialog(dict(q),'center',lambda *_:None,{'review_auto_word':False,'review_book':'cet6_kyle'},'1 / 3')
 legacy.show();app.processEvents()
 header=next(x for x in legacy.findChildren(QLabel) if 'VOCABULARY' in x.text())
@@ -47,7 +55,7 @@ unnamed=ReviewDialog(dict(q),'center',lambda *_:None,{'review_auto_word':False},
 unnamed.show();app.processEvents()
 header=next(x for x in unnamed.findChildren(QLabel) if 'VOCABULARY' in x.text())
 assert header.text()=='VOCABULARY  ·  未选词书  ·  到期复习',header.text()
-named.close();lit.close();newness.close();legacy.close();unnamed.close();app.processEvents()
+named.close();lit.close();newness.close();learning.close();legacy.close();unnamed.close();app.processEvents()
 q['_new_group']=True
 d=ReviewDialog(q,'center',lambda *_:None,{'review_auto_word':False},'1 / 3');d.show();app.processEvents()
 assert not any('自动进入下一组' in label.text() for label in d.findChildren(QLabel)), \
