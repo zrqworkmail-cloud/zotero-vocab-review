@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import traceback
+import urllib.error
 import urllib.parse
 import urllib.request
 from ctypes import wintypes
@@ -221,11 +222,26 @@ def api(action, params=None, timeout=15):
         "http://127.0.0.1:8765", body,
         {"Content-Type": "application/json"}, method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        value = json.loads(response.read().decode("utf-8"))
-    if value.get("error"):
-        raise RuntimeError(value["error"])
-    return value.get("result")
+    # Localhost must not ride the system proxy, and a brief AnkiConnect hiccup must not
+    # cost a rating: retry transient connection failures, but leave the reason in the log.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                value = json.loads(response.read().decode("utf-8"))
+            if value.get("error"):
+                raise RuntimeError(value["error"])
+            return value.get("result")
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+            if attempt >= attempts:
+                log_runtime("AnkiConnect request failed: action=%s error=%s" % (action, error))
+                raise
+            log_runtime("AnkiConnect transient failure: action=%s attempt=%d/%d error=%s"
+                        % (action, attempt, attempts, error))
+            time.sleep(0.2 * attempt)
 
 
 def dictionary(word):
