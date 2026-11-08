@@ -16,6 +16,7 @@ for n in ('QObject','QTimer','Qt','pyqtSignal','QEasingCurve','QEvent','QRectF',
 sys.modules['aqt']=aqt;sys.modules['aqt.qt']=qt
 package=types.ModuleType('zotero_global_capture');package.__path__=[os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'anki-global-addon', 'zotero_global_capture'))];sys.modules['zotero_global_capture']=package
 from zotero_global_capture.review_popup import ReviewDialog
+from zotero_global_capture import review_logic as logic
 from PyQt6.QtTest import QTest
 app=QApplication([])
 
@@ -34,6 +35,7 @@ scope.update(settings=lambda: dict(cfg), mw=aqt.mw, controller=types.SimpleNames
     setup_cet6_books=lambda: None, browse_cet6_book=lambda key: None, open_cet6_listening=lambda: None,
     study_books=lambda c: [{'id':'cet6_core','name':'六级核心'},{'id':'cet6_full','name':'六级全表'}],
     study_book_id=lambda c: 'cet6_core', book_card_count=lambda book: 439,
+    selection_entries=logic.selection_entries,
     choose_study_book=lambda key: None, write_quality_report=lambda: None)
 for name in wanted:
     node=next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name==name)

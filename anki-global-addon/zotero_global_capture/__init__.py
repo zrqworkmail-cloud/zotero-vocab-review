@@ -29,11 +29,12 @@ from . import card_motion
 from .review_popup import DesktopReviewController, enable_click_away, popup_style
 from .review_logic import (BOOK_MIGRATION, apply_auto_sync_preference, book_clause, book_label, book_progress,
                            collection_plan, hide_instead_of_quit, background_instead_of_quit, install_sync_error_guard, resolve_book_decks,
-                           study_book, study_book_id, study_books, selected_review_modes, sync_due,
+                           study_book, study_book_id, study_books, selected_review_modes, selection_entries, selection_labels, selection_summary, selection_clause, sync_due,
                            MODE_LABELS, MODE_ORDER,
                            quit_request_path, take_quit_request, MASTERED_TAG,
                            validate_windows, window_minutes)
 from .exam_dates import fetch_cet
+from .selection_ui import SelectionPicker
 from .study_dashboard import activity_counts, dashboard_html
 from . import core_import, cet6_books, cet6_listening, audio_volume, speech, review_logic, review_quality
 
@@ -60,6 +61,7 @@ DEFAULTS = {
     "review_core_enabled": True,
     "review_book": "",
     "study_book": "",
+    "study_selection": [],
     "review_extra_deck": "四六级单词",
     "review_batch_size": 3,
     "review_plan_mode": "fixed",
@@ -1060,32 +1062,22 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     volume_preview_button.clicked.connect(lambda _checked=False: volume_preview(int(review_volume.value())))
     review_core = QCheckBox("优先学习四六级核心词（到期复习仍优先）")
     review_core.setChecked(bool(cfg.get("review_core_enabled", True)))
-    # The book list is the whole scope model now: pick one named book here and every
-    # card says which book it came from. Books whose tag or deck is not actually in
+    # The book list is the whole scope model now: pick the 词组 to study, in the order
+    # they hand over when one runs out. Books whose tag or deck is not actually in
     # this collection are not offered, so the list can never drift away from reality.
     known_tags = local_tags()
     available_books = [book for book in study_books(cfg)
                        if (book.get('tag') and known_tags and book['tag'] in known_tags)
                        or (book.get('deck') and book['deck'] in deck_names)]
-    chosen_book = study_book_id(cfg)
-    book_choices = QWidget()
-    book_choices.setObjectName('studyBookList')
-    book_choices_layout = QVBoxLayout(book_choices)
-    book_choices_layout.setContentsMargins(0, 0, 0, 0)
-    book_choices_layout.setSpacing(3)
-    book_radios = []
-    for book in available_books:
-        radio = QRadioButton(book['name'])
-        radio.setObjectName('studyBook')
-        radio.setProperty('bookId', book['id'])
-        radio.setToolTip('范围：%s' % (book.get('tag') or ('牌组 ' + book.get('deck', ''))))
-        radio.setChecked(book['id'] == chosen_book)
-        book_choices_layout.addWidget(radio)
-        book_radios.append(radio)
-    if not book_radios:
-        book_choices_layout.addWidget(QLabel('这个账户里还没有可学的词书，请先导入词表或给卡片打标签。'))
+    if available_books:
+        book_choices = SelectionPicker(available_books, selection_entries(cfg), collection_api, cfg)
+    else:
+        book_choices = QWidget()
+        book_choices.setObjectName('studyBookList')
+        QVBoxLayout(book_choices).addWidget(
+            QLabel('这个账户里还没有可学的词书，请先导入词表或给卡片打标签。'))
     def book_value():
-        return next((radio.property('bookId') for radio in book_radios if radio.isChecked()), '')
+        return book_choices.value() if available_books else []
     review_smart = QCheckBox("到期单词提前提醒（每 5 分钟检查）")
     review_smart.setChecked(bool(cfg["review_smart"]))
     review_position = QComboBox()
@@ -1137,8 +1129,8 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     form.addRow("弹出间隔", review_interval)
     form.addRow("记忆复习", review_smart)
     form.addRow("核心词优先", review_core)
-    form.addRow("学习词书（单选）", book_choices)
-    extra_help = QLabel("选一本词书就开始学，卡片上会一直写着它的名字和进度。词书是标签视图，不是牌组：六级核心本来就是六级全表的一部分，而一张卡只能属于一个牌组，所以用标签才能并列。每日新卡上限仍按牌组计，由 Anki 控制。")
+    form.addRow("学习词组（多选，按顺序接续）", book_choices)
+    extra_help = QLabel("勾选要学的词组，↑↓ 决定先学哪本：一本学完自动接下一本。▾ 展开后可只学勾选标签的合集，（无标签）也是可选的一项；不勾标签 = 整本。词组是标签视图，不是牌组：六级核心本来就是六级全表的一部分，而一张卡只能属于一个牌组，所以用标签才能并列。每日新卡上限仍按牌组计，由 Anki 控制。")
     extra_help.setObjectName('scopeHelp')
     extra_help.setWordWrap(True)
     form.addRow(extra_help)
@@ -1216,7 +1208,7 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
         if deck.currentData() not in deck_names or model.currentData() not in model_names:
             problems.append('请选择有效的牌组和笔记类型。')
         if not book_value():
-            problems.append('请选择一本要学的词书。')
+            problems.append('请至少勾选一本要学习的词组。')
         if front.currentData() not in fields or back.currentData() not in fields or front.currentData() == back.currentData():
             problems.append('单词字段和释义字段需要存在且不同。')
         if not review_modes_value():
@@ -1236,8 +1228,8 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     shortcut.feedback.connect(update_validity)
     for selector in (deck, front, back):
         selector.currentIndexChanged.connect(update_validity)
-    for radio in book_radios:
-        radio.toggled.connect(update_validity)
+    if available_books:
+        book_choices.changed.connect(update_validity)
     for check in mode_checks:
         check.toggled.connect(update_validity)
     refresh_fields(initial=True)
@@ -1249,7 +1241,7 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
             plan_summary.setText('请选择有效牌组和笔记类型。')
             return
         preview = dict(cfg, deck=deck.currentData(), model=model.currentData(),
-                       study_book=book_value(),
+                       study_selection=book_value(),
                        review_deadline=deadline.date().toString('yyyy-MM-dd') if deadline_enabled.isChecked() else '',
                        review_daily_goal=daily_goal.value(), review_computer_hours=computer_hours.value(),
                        review_windows_enabled=windows_enabled.isChecked(), review_windows=windows_value(),
@@ -1272,8 +1264,8 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
                             (review_interval, 'valueChanged'), (deadline, 'dateChanged'),
                             (deadline_enabled, 'toggled')):
         getattr(control, signal).connect(update_plan)
-    for check in book_radios:
-        check.toggled.connect(update_plan)
+    if available_books:
+        book_choices.changed.connect(update_plan)
     for control, signal in ((plan_mode, 'currentIndexChanged'), (daily_goal, 'valueChanged'),
                             (deadline_enabled, 'toggled'), (deadline, 'dateChanged')):
         getattr(control, signal).connect(update_validity)
@@ -1365,7 +1357,7 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
                 "review_volume": review_volume.value(),
                 "review_smart": review_smart.isChecked(),
                 "review_core_enabled": review_core.isChecked(),
-                "study_book": book_value(),
+                "study_selection": book_value(),
                 "review_position": review_position.currentData(),
                 "review_theme": review_theme.currentData(),
                 "review_modes": review_modes_value(),
@@ -1609,11 +1601,11 @@ def browse_core_words():
 def add_review_to_toolbar(links, toolbar):
     # Links are rebuilt as HTML strings each time Anki runs this hook, so the current
     # scope can be named here; a saved change shows up on the next toolbar rebuild.
-    book = study_book(settings())
-    name = book['name'] if book else '未选词书'
+    labels = selection_labels(settings())
+    name = '、'.join(labels) if labels else '未选词书'
     links.append(toolbar.create_link(
         'zvr-desktop-review', '开始学习 · %s' % name, open_review_from_toolbar,
-        tip='立即弹出「%s」的学习卡；换词书在 工具 → 切换词书' % name, id='zvr-desktop-review'))
+        tip='立即弹出「%s」的学习卡；换词组在 工具 → 切换词书' % name, id='zvr-desktop-review'))
 
 
 def refresh_toolbar():
@@ -1633,7 +1625,18 @@ def choose_study_book(book_id, start=True):
         show_feedback('请先关闭当前复习卡，再切换词书。')
         return
     cfg = dict(settings())
-    cfg['study_book'] = book_id
+    # The quick switcher promotes the picked book to the front of the handover order.
+    # It must not drop the other chosen books or their tag subsets — the settings picker
+    # is the only place a selection is removed. A book not yet chosen joins at the front.
+    entries = [{'book': entry['book']['id'], 'tags': list(entry['tags'])}
+               for entry in selection_entries(cfg)]
+    picked = next((entry for entry in entries if entry['book'] == book_id), None)
+    if picked is None:
+        picked = {'book': book_id, 'tags': []}
+    else:
+        entries.remove(picked)
+    cfg['study_selection'] = [picked] + entries
+    cfg.pop('study_book', None)
     try:
         save_settings(cfg)
     except Exception as error:
@@ -1663,12 +1666,12 @@ def study_book_menu(tools):
 
     def refresh():
         cfg = settings()
-        current = study_book_id(cfg)
+        chosen = {entry['book']['id'] for entry in selection_entries(cfg)}
         menu.clear()
         for book in study_books(cfg):
             action = menu.addAction('%s　%d 张' % (book['name'], book_card_count(book)))
             action.setCheckable(True)
-            action.setChecked(book['id'] == current)
+            action.setChecked(book['id'] in chosen)
             action.triggered.connect(lambda _checked=False, key=book['id']: choose_study_book(key))
     menu.aboutToShow.connect(refresh)
     return menu
@@ -1690,7 +1693,7 @@ def add_study_dashboard(_browser, content):
             log_runtime('book totals unavailable: %s' % type(error).__name__)
         selected = set()
         escape = lambda value: str(value).replace('\\', '\\\\').replace('"', '\\"')
-        base = 'note:"%s"%s -is:suspended -is:buried' % (escape(cfg['model']), book_clause(study_book(cfg)))
+        base = 'note:"%s"%s -is:suspended -is:buried' % (escape(cfg['model']), selection_clause(selection_entries(cfg)))
         for deck_name in resolve_book_decks(collection_api, cfg):
             selected.update(mw.col.find_cards('deck:"%s" %s' % (escape(deck_name), base)))
         start = datetime.datetime.combine(today - datetime.timedelta(days=27), datetime.time.min).timestamp()

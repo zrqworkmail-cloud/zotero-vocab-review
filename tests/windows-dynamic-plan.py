@@ -41,4 +41,21 @@ for mode, target in [('daily',6),('fixed',4)]:
  # The eyebrow's 已学/总数 has to be stamped on the in-session path as well, or only
  # the first card of a session would show progress.
  assert got[0][1][0]['_book_progress']==(47,481),got[0][1][0]
+# The progress beside the eyebrow's book name must count THAT book, not the whole
+# selection: a card drawn from the second entry carries _selection_index, and the
+# book_progress call has to receive a cfg pinned to it.
+seen_cfg=[]
+cfg={'review_plan_mode':'fixed','review_mode':'typing',
+     'study_selection':[{'book':'cet4_core','tags':[]},{'book':'cet6_full','tags':[]}]}
+ctl=DesktopReviewController(lambda:cfg,lambda *args:None,lambda *args:None,lambda *args:None);ctl.session_target=4;ctl.session_seen={1}
+dlg=types.SimpleNamespace(question={'card_id':2,'word':'test'});ctl.dialog=dlg;got=[]
+ctl.signals.saved.disconnect(ctl._saved);ctl.signals.graded.disconnect(ctl._graded);ctl.signals.graded.connect(lambda d,e,g,n:got.append((e,n)))
+rp.prepare_question=lambda *a,**k:{'card_id':3,'_selection_index':1}
+rp.book_progress=lambda api,cfg:seen_cfg.append(dict(cfg)) or (7,4803)
+ctl._grade(dlg,3)
+for _ in range(100):
+ app.processEvents();QTest.qWait(5)
+ if got:break
+assert got and got[0][1][0]['_book_progress']==(7,4803),got
+assert seen_cfg and seen_cfg[-1].get('_selection_index')==1,seen_cfg
 print('Qt: post-rating recalculates automatic target, keeps the target in fixed mode, and stamps book progress on the next card')

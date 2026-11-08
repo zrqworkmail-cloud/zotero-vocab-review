@@ -56,6 +56,16 @@ unnamed.show();app.processEvents()
 header=next(x for x in unnamed.findChildren(QLabel) if 'VOCABULARY' in x.text())
 assert header.text()=='VOCABULARY  ·  未选词书  ·  到期复习',header.text()
 named.close();lit.close();newness.close();learning.close();legacy.close();unnamed.close();app.processEvents()
+# Spec §8: with several 词组 chosen, the eyebrow names the entry this card was drawn from
+# (_selection_index), not the first book of the selection and not 未选词书.
+multi_cfg={'review_auto_word':False,'study_selection':[{'book':'cet4_core','tags':[]},{'book':'cet6_full','tags':[]}],
+           '_book_progress':(0,4803)}
+multi=ReviewDialog(dict(q,_selection_index=1),'center',lambda *_:None,multi_cfg,'1 / 3')
+multi.show();app.processEvents()
+header=next(x for x in multi.findChildren(QLabel) if 'VOCABULARY' in x.text())
+assert header.text()=='VOCABULARY  ·  六级全表  ·  0/4803  ·  到期复习',header.text()
+assert '六级全表' in header.toolTip(),header.toolTip()
+multi.close();app.processEvents()
 q['_new_group']=True
 d=ReviewDialog(q,'center',lambda *_:None,{'review_auto_word':False},'1 / 3');d.show();app.processEvents()
 assert not any('自动进入下一组' in label.text() for label in d.findChildren(QLabel)), \

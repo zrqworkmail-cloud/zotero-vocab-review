@@ -35,7 +35,10 @@ QUOTED = r'"((?:[^"\\]|\\.)*)"'
 DECK_TERM = re.compile(r'deck:' + QUOTED)
 NOTE_TERM = re.compile(r'note:' + QUOTED)
 OTHER_ATOM = re.compile(r'-?is:\S+|prop:\S+|rated:\S+|introduced:\S+|cid:\S+')
-TOKEN = re.compile(r'\(|\)|\bAND\b|\bOR\b|tag:' + QUOTED)
+# -tag: is part of the token, not a stray minus the tokenizer may drop: the untagged
+# subset renders as negations, and an oracle that read them as positive would pass
+# exactly the clauses that hide every card.
+TOKEN = re.compile(r'\(|\)|\bAND\b|\bOR\b|-?tag:' + QUOTED)
 
 
 def _tag_atoms(query):
@@ -49,6 +52,8 @@ def _tokenize(text):
         piece = match.group(0)
         if piece.startswith('tag:'):
             tokens.append(('tag', match.group(1).replace('\\"', '"')))
+        elif piece.startswith('-tag:'):
+            tokens.append(('-tag', match.group(1).replace('\\"', '"')))
         else:
             tokens.append((piece, None))
     return tokens
@@ -67,8 +72,15 @@ def _parse_expr(tokens, position, tags):
 
 def _parse_term(tokens, position, tags):
     value, position = _parse_factor(tokens, position, tags)
-    while position < len(tokens) and tokens[position][0] == 'AND':
-        right, position = _parse_factor(tokens, position + 1, tags)
+    while position < len(tokens):
+        if tokens[position][0] == 'AND':
+            right, position = _parse_factor(tokens, position + 1, tags)
+        elif tokens[position][0] in ('tag', '-tag', '('):
+            # Anki reads juxtaposition as AND ("tag:a tag:b"); dropping the second
+            # factor would make every narrowed query match its whole book.
+            right, position = _parse_factor(tokens, position, tags)
+        else:
+            break
         value = value and right
     return value, position
 
@@ -84,6 +96,8 @@ def _parse_factor(tokens, position, tags):
         return value, position
     if kind == 'tag':
         return name in tags, position + 1
+    if kind == '-tag':
+        return name not in tags, position + 1
     return True, position + 1
 
 
@@ -275,6 +289,113 @@ class PlanAcrossEntries(unittest.TestCase):
             cfg(study_selection=[{'book': 'core'}, {'book': 'full'}])), elsewhere_due=7)
         self.assertIn('六级核心、六级全表', said)
         self.assertIn('7 张到期卡不在所选词组内', said)
+
+
+class EyebrowNamesTheDrawnBook(unittest.TestCase):
+    """Spec §8: with several 词组 chosen, the card must name the one this card came
+    from — not the first in the list, which is what a plain book_label(cfg) prints."""
+
+    def test_the_index_names_the_second_book(self):
+        base = cfg(study_selection=[{'book': 'core'}, {'book': 'full'}])
+        self.assertEqual(logic.question_book_label(base, {'_selection_index': 1}), '六级全表')
+
+    def test_no_index_falls_back_to_the_legacy_single_book(self):
+        self.assertEqual(logic.question_book_label(cfg(study_book='core'), {}), '六级核心')
+
+    def test_an_out_of_range_index_falls_back_rather_than_raising(self):
+        base = cfg(study_selection=[{'book': 'core'}], study_book='core')
+        self.assertEqual(logic.question_book_label(base, {'_selection_index': 7}), '六级核心')
+
+    def test_no_selection_at_all_reads_empty(self):
+        self.assertEqual(logic.question_book_label(cfg(), {'_selection_index': 0}), '')
+
+
+class UntaggedAnki(FakeAnki):
+    """Adds the two calls the untagged expansion needs: the tag vocabulary and `multi`."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.actions = []
+
+    def __call__(self, action, params):
+        self.actions.append(action)
+        if action == 'getTags':
+            return sorted({tag for _, tags in CARDS.values() for tag in tags})
+        if action == 'multi':
+            return [self('findCards', inner['params']) for inner in params['actions']]
+        return super().__call__(action, params)
+
+
+class UntaggedSelection(unittest.TestCase):
+    """（无标签）is a first-class choice (spec §9): checking only it studies the cards
+    that carry nothing but the book's own tag. The sentinel travels in `tags` and is
+    expanded against the book's real tag vocabulary at query time, so it never goes
+    stale the way a saved exclusion list would."""
+
+    def test_the_sentinel_is_the_row_label(self):
+        self.assertEqual(logic.UNTAGGED, '（无标签）')
+
+    def test_untagged_only_renders_as_explicit_negations(self):
+        clause = logic.entry_clause({'book': BOOKS[1], 'tags': [logic.UNTAGGED],
+                                     '_untagged_exclude': ['高频', '真题']})
+        self.assertEqual(clause, ' tag:"zvr_cet6_full" AND (-tag:"高频" AND -tag:"真题")')
+
+    def test_untagged_joins_real_tags_as_a_union_operand(self):
+        clause = logic.entry_clause({'book': BOOKS[1], 'tags': ['高频', logic.UNTAGGED],
+                                     '_untagged_exclude': ['高频', '真题', '学术']})
+        self.assertEqual(clause, ' tag:"zvr_cet6_full" AND (tag:"高频" OR '
+                                 '(-tag:"高频" AND -tag:"真题" AND -tag:"学术"))')
+
+    def test_an_unresolved_sentinel_widens_to_the_whole_book(self):
+        # No vocabulary attached (a pure caller, or the lookup failed): showing the whole
+        # book is the honest failure — silently hiding the untagged cards is not.
+        self.assertEqual(logic.entry_clause({'book': BOOKS[1], 'tags': [logic.UNTAGGED]}),
+                         ' tag:"zvr_cet6_full"')
+        self.assertEqual(logic.entry_clause({'book': BOOKS[1], 'tags': [logic.UNTAGGED],
+                                             '_untagged_exclude': []}),
+                         ' tag:"zvr_cet6_full"')
+
+    def test_the_sentinel_entry_is_parenthesised_inside_a_selection(self):
+        clause = logic.selection_clause([
+            {'book': BOOKS[0], 'tags': []},
+            {'book': BOOKS[1], 'tags': [logic.UNTAGGED], '_untagged_exclude': ['高频']}])
+        self.assertIn('(tag:"zvr_cet6_full" AND (-tag:"高频"))', clause)
+
+    def test_only_untagged_counts_the_cards_with_nothing_but_the_book_tag(self):
+        # Card 5 is the only 六级全表 card with no other tag. If the expansion negated the
+        # book's own tag too, this would come back 0 — the whole row would silently vanish.
+        api = UntaggedAnki()
+        base = cfg(study_selection=[{'book': 'full', 'tags': [logic.UNTAGGED]}])
+        self.assertEqual(logic.book_progress(api, base)[1], 1)
+
+    def test_adding_a_real_tag_widens_the_untagged_pool(self):
+        api = UntaggedAnki()
+        alone = cfg(study_selection=[{'book': 'full', 'tags': [logic.UNTAGGED]}])
+        mixed = cfg(study_selection=[{'book': 'full', 'tags': [logic.UNTAGGED, '高频']}])
+        self.assertEqual(logic.book_progress(api, alone)[1], 1)
+        self.assertEqual(logic.book_progress(api, mixed)[1], 2)   # card 5 plus card 1
+
+    def test_prepare_question_draws_the_untagged_card(self):
+        api = UntaggedAnki()
+        base = cfg(study_selection=[{'book': 'full', 'tags': [logic.UNTAGGED]}])
+        question = logic.prepare_question(api, base, 'typing', random.Random(1))
+        self.assertEqual(question['card_id'], 5)
+        self.assertEqual(question['_selection_index'], 0)
+
+    def test_no_sentinel_means_no_vocabulary_calls(self):
+        api = UntaggedAnki()
+        base = cfg(study_selection=[{'book': 'full', 'tags': ['高频']}])
+        logic.book_progress(api, base)
+        self.assertNotIn('getTags', [call for call in api.actions])
+        self.assertNotIn('multi', [call for call in api.actions])
+
+    def test_the_vocabulary_is_fetched_once_per_cfg_view(self):
+        api = UntaggedAnki()
+        base = cfg(study_selection=[{'book': 'full', 'tags': [logic.UNTAGGED]}])
+        view = logic._expand_untagged(api, base)
+        logic.book_progress(api, view)
+        self.assertEqual(api.actions.count('getTags'), 1)
+        self.assertEqual(api.actions.count('multi'), 1)
 
 
 class NoShadowedDefinitions(unittest.TestCase):

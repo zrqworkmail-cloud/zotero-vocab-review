@@ -33,6 +33,8 @@ def environment(config, saved, shown, feedback, drawn=None):
             'study_book': logic.study_book,
             'study_books': logic.study_books,
             'study_book_id': logic.study_book_id,
+            'selection_entries': logic.selection_entries,
+            'selection_labels': logic.selection_labels,
             'open_review_from_toolbar': lambda: None}
 
 
@@ -60,6 +62,14 @@ class Toolbar(unittest.TestCase):
         config = {'study_book': 'literature'}
         self.assertIn('文献单词', self.collect(config)[0][0])
 
+    def test_a_multi_selection_names_every_book_on_the_button(self):
+        config = {'study_selection': [{'book': 'cet6_core', 'tags': []},
+                                      {'book': 'cet6_full', 'tags': ['高频']}]}
+        label, kw = self.collect(config)[0]
+        self.assertIn('六级核心', label)
+        self.assertIn('六级全表', label)
+        self.assertIn('六级全表', kw['tip'])
+
 
 class Switching(unittest.TestCase):
     def run_switch(self, config, book_id, dialog=None, busy=False, fail=False):
@@ -77,9 +87,25 @@ class Switching(unittest.TestCase):
 
     def test_switching_saves_the_book_and_starts(self):
         saved, shown, messages = self.run_switch({'study_book': 'cet6_core'}, 'cet4_core')
-        self.assertEqual([cfg['study_book'] for cfg in saved], ['cet4_core'])
+        self.assertEqual([cfg['study_selection'] for cfg in saved],
+                         [[{'book': 'cet4_core', 'tags': []}, {'book': 'cet6_core', 'tags': []}]],
+                         'the picked book leads the handover; the old one stays behind it')
         self.assertEqual(shown, [True])
         self.assertEqual(messages, [])
+
+    def test_switching_promotes_a_book_already_in_the_selection_without_dropping_tags(self):
+        config = {'study_selection': [{'book': 'cet6_core', 'tags': []},
+                                      {'book': 'cet6_full', 'tags': ['高频', '真题']}]}
+        saved, shown, messages = self.run_switch(config, 'cet6_full')
+        self.assertEqual(saved[0]['study_selection'],
+                         [{'book': 'cet6_full', 'tags': ['高频', '真题']},
+                          {'book': 'cet6_core', 'tags': []}],
+                         'the tag subset must survive the promotion')
+        self.assertEqual(shown, [True])
+
+    def test_switching_does_not_write_the_legacy_key(self):
+        saved, shown, messages = self.run_switch({'study_book': 'cet6_core'}, 'cet4_core')
+        self.assertNotIn('study_book', saved[0], '写回时只写 study_selection（spec §3.1）')
 
     def test_switching_refreshes_the_toolbar_name_immediately(self):
         # The old label survived until an Anki restart, so the button kept naming

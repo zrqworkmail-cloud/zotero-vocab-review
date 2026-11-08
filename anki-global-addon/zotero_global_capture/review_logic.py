@@ -736,6 +736,14 @@ def book_untagged_count(api, book, tags):
         return 0
 
 
+# The picker's （无标签）row travels inside `tags` as this sentinel. It is expanded against
+# the book's real tag vocabulary at query time (_expand_untagged), never stored as a concrete
+# exclusion list — a saved list would go stale the moment a card is re-tagged. A real tag
+# with this exact name would collide; the picker lists the pseudo row last so the count
+# still tells them apart.
+UNTAGGED = '（无标签）'
+
+
 def selection_entries(cfg):
     """The ordered 词组 selections in force, each validated against the catalogue.
 
@@ -773,13 +781,27 @@ def entry_clause(entry):
     """One entry's search fragment: its book, narrowed to the union of the chosen tags.
 
     Union, not intersection — checking a second tag must never make the pool smaller, which
-    is what an intersection would do and what the learner would read as a bug.
+    is what an intersection would do and what the learner would read as a bug. The UNTAGGED
+    sentinel joins that union as an operand of explicit negations: "none of the other tags
+    on this book's cards". Without a vocabulary attached it widens to the whole book rather
+    than silently hiding the untagged cards.
     """
     base = book_clause(entry.get('book'))
     tags = entry.get('tags') or []
     if not tags:
         return base
-    joined = ' OR '.join('tag:"%s"' % _escape(tag) for tag in tags)
+    operands = ['tag:"%s"' % _escape(tag) for tag in tags if tag != UNTAGGED]
+    if UNTAGGED in tags:
+        exclude = entry.get('_untagged_exclude') or []
+        if not exclude:
+            # No other tags on the book (or the vocabulary could not be read): every card
+            # is untagged, and "everything OR anything" is the whole book.
+            return base
+        negations = ' AND '.join('-tag:"%s"' % _escape(tag) for tag in exclude)
+        # The negation group is one operand already; a lone operand needs no second
+        # paren layer, only a union does.
+        operands.append('(%s)' % negations if operands else negations)
+    joined = ' OR '.join(operands)
     subset = '(%s)' % joined
     if not base.strip():
         return ' %s' % subset
@@ -813,7 +835,7 @@ def entry_view(cfg, index):
     that reads it, which is what keeps the change from spreading through the module.
     """
     entries = selection_entries(cfg)
-    if not 0 <= index < len(entries):
+    if index is None or not 0 <= index < len(entries):
         return None
     view = dict(cfg)
     view['_selection_index'] = index
@@ -822,12 +844,42 @@ def entry_view(cfg, index):
 
 
 def current_entries(cfg):
-    """The entries this cfg should search over: one when pinned, all otherwise."""
+    """The entries this cfg should search over: one when pinned, all otherwise.
+
+    An entry carrying the UNTAGGED sentinel also picks up its exclusion vocabulary here,
+    from the map `_expand_untagged` stamped on the cfg — the one place the pure clause
+    builders and the api-bearing callers meet.
+    """
     entries = selection_entries(cfg)
     index = (cfg or {}).get('_selection_index')
-    if index is None:
-        return entries
-    return [entries[index]] if 0 <= index < len(entries) else []
+    if index is not None:
+        entries = [entries[index]] if 0 <= index < len(entries) else []
+    vocab = (cfg or {}).get('_untagged_vocab') or {}
+    for entry in entries:
+        if UNTAGGED in entry['tags'] and entry['book']['id'] in vocab:
+            entry['_untagged_exclude'] = vocab[entry['book']['id']]
+    return entries
+
+
+def _expand_untagged(api, cfg):
+    """Resolve every UNTAGGED sentinel in the selection against the book's real tags.
+
+    Costs one getTags plus one batched multi per sentinel-bearing book (measured 0.36 s
+    for 30 tags / 5211 cards), and only when the sentinel is actually selected — a plain
+    selection returns the same cfg untouched. The vocabulary rides on the returned view
+    so the several clause builders inside one call share a single lookup. The book's own
+    tag is never excluded: negating it would empty the row.
+    """
+    wanted = [entry for entry in selection_entries(cfg) if UNTAGGED in entry['tags']]
+    if not wanted:
+        return cfg
+    vocab = dict((cfg or {}).get('_untagged_vocab') or {})
+    for entry in wanted:
+        book = entry['book']
+        if book['id'] not in vocab:
+            vocab[book['id']] = [tag for tag, _count in book_tag_counts(api, cfg, book)
+                                 if tag != book.get('tag')]
+    return dict(cfg, _untagged_vocab=vocab)
 
 
 def selection_labels(cfg):
@@ -838,6 +890,21 @@ def selection_summary(cfg):
     """'六级核心、六级全表' for the end-of-session sentence, or the single book name."""
     labels = selection_labels(cfg)
     return '、'.join(labels) if labels else '这本词书'
+
+
+def question_book_label(cfg, question):
+    """The book name for the card eyebrow: the entry this card was actually drawn from.
+
+    prepare_question stamps `_selection_index` when it hands over to a later entry; without
+    it (a legacy single-book cfg, or a hand-built question) the old book_label reading is
+    still the honest answer. An index past the end means the selection changed under the
+    card — fall back rather than raise on the UI path.
+    """
+    index = (question or {}).get('_selection_index')
+    entries = selection_entries(cfg)
+    if index is not None and 0 <= index < len(entries):
+        return entries[index]['book']['name']
+    return book_label(cfg)
 
 
 def _clause_for(cfg):
@@ -904,6 +971,7 @@ def book_suspended(api, cfg):
     left" while 247 cards sit in his 挂起 list (measured on 《六级全表》, 2026-11-06). Suspended
     is his scheduling state: this counts it, and never touches it.
     """
+    cfg = _expand_untagged(api, cfg)
     try:
         return len(api('findCards', {'query': 'is:suspended' + _clause_for(cfg)}) or [])
     except Exception:
@@ -916,6 +984,7 @@ def due_outside_book(api, cfg):
     Read-only, and only asked for at end-of-session, where the sentence needs it to tell the
     learner whether "nothing left" means the collection or just their chosen 词组.
     """
+    cfg = _expand_untagged(api, cfg)
     try:
         everywhere = set(api('findCards', {'query': 'is:due'}) or [])
     except Exception:
@@ -936,6 +1005,7 @@ def book_progress(api, cfg):
     'learned' means the card has been answered at least once — the wording the user picked,
     and deliberately not 'mature'.
     """
+    cfg = _expand_untagged(api, cfg)
     clause = _clause_for(cfg)
     if not clause and not current_entries(cfg):
         return (0, 0)
@@ -955,6 +1025,7 @@ def book_availability(api, cfg):
     the deck's quota is spent. collection_plan suggests a deadline pace; this answers
     the narrower "can the button start a session right now" question.
     """
+    cfg = _expand_untagged(api, cfg)
     new_now = due_now = 0
     for deck in resolve_book_decks(api, cfg):
         stats = _stats(api, deck)
@@ -1400,6 +1471,7 @@ def review_decks(cfg):
 
 def collection_plan(api, cfg, now=None):
     now = now or datetime.datetime.now()
+    cfg = _expand_untagged(api, cfg)
     decks = resolve_book_decks(api, cfg)
     found = {'new': set(), 'due': set(), 'done': set(), 'introduced': set()}
     for deck in decks:
@@ -1520,6 +1592,7 @@ def prepare_question(api, cfg, mode='mixed', rng=random, due_only=False):
     back. Entries are tried in list order and the first one that can produce a card wins, so
     a finished 词组 hands over to the next without any stored cursor to go stale.
     """
+    cfg = _expand_untagged(api, cfg)
     if cfg.get('_selection_index') is not None:
         return _question_from(api, cfg, mode, rng, due_only)
     entries = selection_entries(cfg)

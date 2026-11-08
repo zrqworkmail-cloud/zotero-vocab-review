@@ -36,15 +36,24 @@ source=os.path.abspath(os.path.join(os.path.dirname(__file__),'..','anki-global-
 sp=importlib.util.spec_from_file_location('review_logic',os.path.join(source,'review_logic.py'));logic=importlib.util.module_from_spec(sp);sp.loader.exec_module(logic)
 sp2=importlib.util.spec_from_file_location('audio_volume',os.path.join(source,'audio_volume.py'));audio_volume=importlib.util.module_from_spec(sp2);sp2.loader.exec_module(audio_volume)
 sp3=importlib.util.spec_from_file_location('card_motion',os.path.join(source,'card_motion.py'));card_motion=importlib.util.module_from_spec(sp3);sp3.loader.exec_module(card_motion)
+package=types.ModuleType('zotero_global_capture');package.__path__=[source];sys.modules['zotero_global_capture']=package
+from zotero_global_capture.selection_ui import SelectionPicker
 review_decks=logic.review_decks
 selected_review_modes=logic.selected_review_modes
-collection_plan=logic.collection_plan
 validate_windows=logic.validate_windows
 window_minutes=logic.window_minutes
 fetch_cet=lambda: '2026-12-12'
 mw.col.find_cards=lambda query: []
 LOCAL_TAGS=['anki_global_capture','zvr_kyle_cet4','zvr_kyle_cet6','zvr_cet6_full','工作/学习']
 local_tags=lambda: list(LOCAL_TAGS)
+# The plan preview must carry the picker's selection, so capture what it is handed instead
+# of letting the real collection_plan run against a stub api.
+plan_previews=[]
+def collection_plan(api,preview):
+ plan_previews.append(dict(preview))
+ return {'days':None,'new_done':0,'new_goal':0,'new_remaining':0,'review_done':0,'review_goal':0,
+         'review_remaining':0,'batch':0,'capacity_shortfall':0,'remaining_new_total':0,
+         'available_new':0,'available_due':0}
 class ShortcutEdit(QLineEdit):
  feedback=pyqtSignal(str)
  def __init__(self,m,v):super().__init__('Ctrl+Shift+F10');self.modifiers=m;self.virtual_key=v;self.valid=True
@@ -53,6 +62,8 @@ tree=ast.parse(open(path,encoding='utf-8').read());node=next(n for n in tree.bod
 scope=globals();scope.update(settings=lambda:dict(cfg),show_feedback=lambda *_a,**_k:None,format_shortcut=lambda *_:'Ctrl+Shift+F10',
 	card_motion=card_motion, MODE_ORDER=logic.MODE_ORDER, MODE_LABELS=logic.MODE_LABELS,
 	local_tags=local_tags,study_books=logic.study_books,study_book_id=logic.study_book_id,refresh_toolbar=lambda:None,
+	selection_entries=logic.selection_entries,SelectionPicker=SelectionPicker,
+	collection_api=None,collection_plan=collection_plan,
 	apply_sync_preference=lambda:None,
 	apply_review_volume=lambda value=None:None, volume_preview=lambda value:None,
 	dialog_now=dialog_now,check=check,failures=failures)
@@ -64,11 +75,25 @@ theme=types.ModuleType('aqt.theme');theme.theme_manager=types.SimpleNamespace(ni
 sys.modules['aqt']=aqt;sys.modules['aqt.theme']=theme
 
 
-def book_radios(d):
- return d.findChild(QWidget,'studyBookList').findChildren(QRadioButton)
+def picker(d):
+ return d.findChild(QWidget,'studySelection')
+
+def book_rows(d):
+ layout=picker(d).layout()
+ return [layout.itemAt(i).widget() for i in range(layout.count())
+         if layout.itemAt(i).widget() is not None and layout.itemAt(i).widget().objectName()=='selectionRow']
+
+def book_row(d,book_id):
+ return next(r for r in book_rows(d) if r.property('bookId')==book_id)
+
+def book_check(d,book_id):
+ return book_row(d,book_id).findChild(QCheckBox,'selectionBook')
 
 def book_ids(d):
- return [x.property('bookId') for x in book_radios(d)]
+ return [r.property('bookId') for r in book_rows(d)]
+
+def checked_ids(d):
+ return [r.property('bookId') for r in book_rows(d) if r.findChild(QCheckBox,'selectionBook').isChecked()]
 
 def save_button(d):
  return d.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save)
@@ -79,67 +104,80 @@ def open_and(act):
 saved=[]
 scope.update(save_settings=lambda data:saved.append(dict(data)),controller=types.SimpleNamespace(listener=types.SimpleNamespace(registered=True,registration_error=''),review=types.SimpleNamespace(dialog=object(),start=lambda:None)))
 
-# 1. The old deck+tag scope controls are gone. The list only offers books that really
-#    exist in this account, and a saved legacy book reopens as the same book checked.
+# 1. The old deck+tag scope controls and the single-choice radio list are gone. The picker
+#    only offers books that really exist in this account, and a saved legacy book reopens
+#    as the same book checked, first in the handover order.
 cfg.update(deck='四六级核心词汇',review_core_enabled=True,review_extra_decks=['四六级核心词汇','文献单词'],
-	review_book='cet6_kyle',review_scope_decks=[],review_scope_tags=[],review_tags_all=False,review_scope_name='')
+	review_book='cet6_kyle',review_scope_decks=[],review_scope_tags=[],review_tags_all=False,review_scope_name='',
+	review_plan_mode='daily',review_daily_goal=20)
 def inspect_first():
  d=dialog_now()
- for name in ('reviewBook','reviewScopeTags','reviewExtraDeck','reviewTagsMatch','reviewAllDecks','reviewScopeName'):
+ for name in ('reviewBook','reviewScopeTags','reviewExtraDeck','reviewTagsMatch','reviewAllDecks','reviewScopeName','studyBookList'):
   check(d.findChild(QWidget,name) is None,'%s must be gone from the book model' % name)
- check(book_ids(d)==['cet6_full','cet4_full','cet6_kyle','literature'],
-       'only books present in the account are offered, got %s' % book_ids(d))
- checked=[x.property('bookId') for x in book_radios(d) if x.isChecked()]
- check(checked==['cet6_kyle'],'the legacy 词书 must reopen as its book checked, got %s' % checked)
+ check(picker(d) is not None,'the multi-select picker must be on the page')
+ check(book_ids(d)==['cet6_kyle','cet6_full','cet4_full','literature'],
+       'the selected book leads, then only books present in the account, got %s' % book_ids(d))
+ check(checked_ids(d)==['cet6_kyle'],'the legacy 词书 must reopen as its book checked, got %s' % checked_ids(d))
  save_button(d).click()
 open_and(inspect_first)
-check(saved[-1]['study_book']=='cet6_kyle','save must write the book id')
+check(saved[-1].get('study_selection')==[{'book':'cet6_kyle','tags':[]}],
+      'save must write the ordered selection, got %s' % saved[-1].get('study_selection'))
+check(plan_previews and plan_previews[-1].get('study_selection')==[{'book':'cet6_kyle','tags':[]}],
+      'the plan preview must span the picker selection, got %s' % (plan_previews[-1].get('study_selection') if plan_previews else None))
 
-# 2. Reopening restores the selection, and picking another book saves that one.
+# 2. Reopening restores the selection; checking a second book saves both in row order,
+#    and ↑↓ changes that order.
 cfg.update(saved[0]);saved.clear()
-def pick_other():
+def pick_second():
  d=dialog_now()
- checked=[x.property('bookId') for x in book_radios(d) if x.isChecked()]
- check(checked==['cet6_kyle'],'reopen must restore the saved book, got %s' % checked)
- next(x for x in book_radios(d) if x.property('bookId')=='cet4_full').setChecked(True)
+ check(checked_ids(d)==['cet6_kyle'],'reopen must restore the saved selection, got %s' % checked_ids(d))
+ book_check(d,'cet4_full').setChecked(True)
+ check(picker(d).value()==[{'book':'cet6_kyle','tags':[]},{'book':'cet4_full','tags':[]}],
+       'checking a second book appends it, got %s' % picker(d).value())
+ book_row(d,'cet4_full').findChild(QPushButton,'selectionUp').click()
+ book_row(d,'cet4_full').findChild(QPushButton,'selectionUp').click()
+ check(picker(d).value()==[{'book':'cet4_full','tags':[]},{'book':'cet6_kyle','tags':[]}],
+       '↑ must move the book earlier in the handover, got %s' % picker(d).value())
  save_button(d).click()
-open_and(pick_other)
-check(saved[-1]['study_book']=='cet4_full','the picked book must save')
+open_and(pick_second)
+check(saved[-1].get('study_selection')==[{'book':'cet4_full','tags':[]},{'book':'cet6_kyle','tags':[]}],
+      'the saved order must match the rows, got %s' % saved[-1].get('study_selection'))
 
 # 3. A saved book whose tag is not in this account must not be re-selected, and the
 #    dialog must refuse to save until a real book is picked.
-cfg.update(saved[-1]);cfg.update(study_book='cet6_core',review_book='');saved.clear()
+cfg.update(saved[-1]);cfg.update(study_selection=[{'book':'cet6_core','tags':[]}],study_book='',review_book='');saved.clear()
 def missing_book():
  d=dialog_now()
- check(not any(x.isChecked() for x in book_radios(d)),'a book with no cards must not be silently re-selected')
+ check(checked_ids(d)==[],'a book with no cards must not be silently re-selected, got %s' % checked_ids(d))
  check(not save_button(d).isEnabled(),'saving without a book must be blocked')
- check(any('请选择一本要学的词书' in x.text() for x in d.findChildren(QLabel)),'the reason must be on screen')
- next(x for x in book_radios(d) if x.property('bookId')=='literature').setChecked(True)
+ check(any('请至少勾选一本' in x.text() for x in d.findChildren(QLabel)),'the reason must be on screen')
+ book_check(d,'literature').setChecked(True)
  check(save_button(d).isEnabled(),'picking a real book must unlock saving')
  save_button(d).click()
 open_and(missing_book)
-check(saved[-1]['study_book']=='literature','saving after the fix must write the real book')
+check(saved[-1].get('study_selection')==[{'book':'literature','tags':[]}],
+      'saving after the fix must write the real book, got %s' % saved[-1].get('study_selection'))
 
 # 4. With no tags at all, tag books are not offered; the deck book still is, and a
-#    legacy tag book resolves to nothing rather than to a dangling selection.
-cfg.update(saved[-1]);cfg.update(study_book='',review_book='cet6_kyle');saved.clear()
+#    saved tag book resolves to nothing rather than to a dangling selection.
+cfg.update(saved[-1]);cfg.update(study_selection=[{'book':'cet6_kyle','tags':[]}]);saved.clear()
 scope.update(local_tags=lambda: [])
 def no_tags():
  d=dialog_now()
  check(book_ids(d)==['literature'],'only the deck book should remain, got %s' % book_ids(d))
- check(not any(x.isChecked() for x in book_radios(d)),'an unavailable legacy book must not stay selected')
+ check(checked_ids(d)==[],'an unavailable saved book must not stay selected, got %s' % checked_ids(d))
  check(not save_button(d).isEnabled(),'nothing selected must block saving')
- next(x for x in book_radios(d) if x.property('bookId')=='literature').setChecked(True)
+ book_check(d,'literature').setChecked(True)
  save_button(d).click()
 open_and(no_tags)
-check(saved and saved[-1]['study_book']=='literature','the deck book must still be saveable')
+check(saved and saved[-1].get('study_selection')==[{'book':'literature','tags':[]}],'the deck book must still be saveable')
 
 # 5. The window and sync controls are on the page with their defaults, because both
 #    change how Anki itself behaves and must not be buried in a config file.
 cfg.update(saved[-1]);cfg.pop('hide_main_on_close',None);cfg.pop('sync_background',None);saved.clear()
 def window_controls():
  d=dialog_now()
- next(x for x in book_radios(d) if x.property('bookId')=='literature').setChecked(True)
+ book_check(d,'literature').setChecked(True)
  hide=d.findChild(QWidget,'hideMainOnClose'); sync=d.findChild(QWidget,'syncBackground'); mins=d.findChild(QWidget,'syncBackgroundMinutes')
  check(hide is not None and hide.isChecked(),'关闭主窗口 must default to 只隐藏')
  check(sync is not None and sync.isChecked(),'后台同步 must be offered and on by default')
@@ -158,7 +196,7 @@ scope.update(apply_review_volume=lambda value=None: applied.append(value), volum
 cfg.update(saved[-1]); cfg.pop('review_volume',None); saved.clear()
 def volume_default():
  d=dialog_now()
- next(x for x in book_radios(d) if x.property('bookId')=='literature').setChecked(True)
+ book_check(d,'literature').setChecked(True)
  dial=d.findChild(QSpinBox,'reviewVolume')
  check(dial is not None,'朗读音量 must be on the page')
  check(dial.value()==180,'a saved profile without the key still gets the louder default, got %s' % dial.value())
@@ -173,7 +211,7 @@ check(saved and saved[-1]['review_volume']==240,saved[-1] if saved else None)
 cfg.update(saved[-1]); saved.clear(); applied.clear()
 def volume_reopens():
  d=dialog_now()
- next(x for x in book_radios(d) if x.property('bookId')=='literature').setChecked(True)
+ book_check(d,'literature').setChecked(True)
  dial=d.findChild(QSpinBox,'reviewVolume')
  check(dial.value()==240,'the saved gain must reopen as itself, got %s' % dial.value())
  hear=d.findChild(QWidget,'volumePreview')
@@ -238,4 +276,4 @@ if failures:
  print('FAIL')
  for f in failures: print('  -', f)
  sys.exit(1)
-print('Qt: 词书单选且只列真实存在的书、旧词书能迁移；音量旋钮回读；两个动效开关各自存回、旧的三档单选钮已消失')
+print('Qt: 词组多选按行序写回 study_selection、旧词书能迁移、计划预览跟选取走；音量旋钮回读；两个动效开关各自存回')

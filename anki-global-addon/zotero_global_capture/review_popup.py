@@ -29,7 +29,7 @@ except ImportError:
     from PyQt6.QtCore import QPoint, QRect
 
 from .review_logic import (answer_report, answer_matches, BOOK_LABEL_SOURCES, clean_detail, clean_text, cloze_sentence, collection_plan, EASE_NAMES, end_of_session_reason, example_groups, exam_word_labels, format_meaning, grading_log_line, link_example_html, literature_example_html, masked_example, mask_answer_clues, meaning_table, next_check_delay, plan_limits_new, root_detail_html,
-                           next_hint_index, prepare_question, hint_share, book_availability, book_label, book_progress, book_suspended, due_outside_book, selected_mode_labels, selection_entries, selection_summary, study_state_label, show_examples, STUDY_STATE_NOTES, meaning_markers, session_batch_size, should_style_card, spelling_hint, letter_hint_label, phonetic_available, pulse_bright, spoken_examples, submit_review, suggested_ease, today_remaining, updated_session_target, window_wait)
+                           next_hint_index, prepare_question, hint_share, book_availability, book_label, book_progress, book_suspended, due_outside_book, entry_view, question_book_label, selected_mode_labels, selection_entries, selection_summary, study_state_label, show_examples, STUDY_STATE_NOTES, meaning_markers, session_batch_size, should_style_card, spelling_hint, letter_hint_label, phonetic_available, pulse_bright, spoken_examples, submit_review, suggested_ease, today_remaining, updated_session_target, window_wait)
 from . import morphology, word_relations, speech, motion_view
 from . import card_motion
 from .card_motion import tier_for
@@ -574,8 +574,9 @@ class ReviewDialog(QDialog):
         layout.setSpacing(10)
         top = QHBoxLayout()
         # The card must say which book it came from and how far that book has been
-        # studied, so a 四级 and a 六级 session are tellable at a glance.
-        book = book_label(self.cfg)
+        # studied, so a 四级 and a 六级 session are tellable at a glance. With several
+        # 词组 chosen, the name follows the entry this card was drawn from.
+        book = question_book_label(self.cfg, question)
         learned, total = self.cfg.get('_book_progress') or (0, 0)
         state = study_state_label(question['kind'], question.get('learning'))
         parts = [book or '未选词书', ('%d/%d' % (learned, total)) if total else '', state]
@@ -2361,9 +2362,11 @@ class DesktopReviewController:
                 remaining = today_remaining(current_plan) if current_plan else None
                 next_question['_today_remaining'] = max(0, remaining - 1) if remaining is not None else None
                 # Cards inside a session arrive through here, not through show_next, so
-                # the eyebrow's 已学/总数 has to be stamped on this path too.
+                # the eyebrow's 已学/总数 has to be stamped on this path too. The count
+                # follows the entry the card was drawn from, not the whole selection.
                 try:
-                    next_question['_book_progress'] = book_progress(self.api, cfg)
+                    view = entry_view(cfg, next_question.get('_selection_index')) or cfg
+                    next_question['_book_progress'] = book_progress(self.api, view)
                 except Exception as error:
                     self.log('book progress unavailable: %s' % type(error).__name__)
             reason = None
@@ -2462,9 +2465,11 @@ class DesktopReviewController:
                 reason = None
                 if question:
                     # The eyebrow says how far this book has been studied. Counting in
-                    # the worker keeps the two findCards queries off the UI thread.
+                    # the worker keeps the two findCards queries off the UI thread. The
+                    # count follows the entry the card was drawn from.
                     try:
-                        question['_book_progress'] = book_progress(self.api, cfg)
+                        view = entry_view(cfg, question.get('_selection_index')) or cfg
+                        question['_book_progress'] = book_progress(self.api, view)
                     except Exception as error:
                         self.log('book progress unavailable: %s' % type(error).__name__)
                     if plan is None and (cfg.get('review_plan_mode') == 'daily' or cfg.get('review_deadline') or cfg.get('review_daily_goal')):
@@ -2494,7 +2499,7 @@ class DesktopReviewController:
         except Exception as error:
             self.log('book availability check failed: %s' % type(error).__name__)
             return None
-        name = book_label(cfg) or '这本词书'
+        name = selection_summary(cfg)
         if due_only:
             if due_now:
                 return ('「%s」还有 %d 张到期卡，但当前题型凑不出题目；到设置里多勾一种题型试试。' % (name, due_now))
