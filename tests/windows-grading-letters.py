@@ -79,13 +79,13 @@ app.processEvents(); QTest.qWait(60)
 assert dialog.answer_shown and not dialog.force_again, (dialog.answer_shown, dialog.force_again)
 assert [b.text() for b in visible(dialog)] == ['A. Again', 'B. Hard', 'C. Good', 'D. Easy'], [b.text() for b in visible(dialog)]
 assert letters(dialog) == ['A', 'B', 'C', 'D'], letters(dialog)
-assert 'A–E' in dialog.status.text(), dialog.status.text()
+assert 'A–D' in dialog.status.text(), dialog.status.text()
 taken = graded_by(dialog)
 # Before anything is pressed the row must read as "Enter would use this", not as a
 # decision already made: exactly one outlined suggestion, nothing filled in. A clean
-# spelling puts that outline on E (Mastered) rather than on one of the four ratings.
-row_names = [b.objectName() for b in dialog.grade_buttons] + [dialog.mastered_button.objectName()]
-assert row_names.count('suggest') + row_names.count('suggestMastered') == 1, row_names
+# spelling puts that outline on Easy, the strongest of the four ratings.
+row_names = [b.objectName() for b in dialog.grade_buttons]
+assert row_names.count('suggest') == 1 and row_names[3] == 'suggest', row_names
 assert 'chosen' not in row_names
 for letter, ease in ((Qt.Key.Key_A, 1), (Qt.Key.Key_B, 2), (Qt.Key.Key_C, 3), (Qt.Key.Key_D, 4)):
     # start_grade latches the row; rewind it the way the next card would.
@@ -98,8 +98,6 @@ for letter, ease in ((Qt.Key.Key_A, 1), (Qt.Key.Key_B, 2), (Qt.Key.Key_C, 3), (Q
     assert names[ease - 1] == 'chosen', '%s filled in the wrong button: %s' % (chr(65 + ease - 1), names)
     assert names.count('chosen') == 1 and 'suggest' not in names, \
         'the suggestion must give way to the button actually picked: %s' % names
-    assert dialog.mastered_button.objectName() == 'mastered', \
-        'picking a rating is not mastering: the E outline has to go'
     assert not dialog.grade_buttons[ease - 1].isEnabled(), 'a chosen button must still be locked against a second rating'
 assert taken == [1, 2, 3, 4], 'A/B/C/D must map to the four ratings in order, got %s' % taken
 # Showing the rating row must not resize the card: the buttons share one row, so

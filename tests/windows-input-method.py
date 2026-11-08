@@ -124,7 +124,7 @@ dialog.keyboard = input_mode.ThreadKeyboardLayout(api)
 dialog.keyboard.enable()                       # what showEvent does for a spelling card
 assert api.loaded == ['00000409'], api.loaded
 assert api.current == 0x04090409, hex(api.current)
-# The layout now outlives the flip: the answer face takes A–E as letters, so handing the
+# The layout now outlives the flip: the answer face takes A–D as letters, so handing the
 # keyboard back at reveal is exactly what could have let the input method eat a rating.
 dialog.reveal(True); app.processEvents()
 assert api.current == 0x04090409, ('答案面仍须保持英文布局', hex(api.current))

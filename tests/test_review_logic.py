@@ -635,22 +635,6 @@ class ReviewLogicTests(unittest.TestCase):
         self.assertEqual(logic.suggested_ease(True, 0, 0, 0, 'typing'), 4)
         self.assertEqual(logic.suggested_ease(True, 0, 0), logic.suggested_ease(True, 0, 0, 0, None))
 
-    def test_what_counts_as_already_known_differs_by_question_type(self):
-        # Spelling the base form is its own proof, so no clock is needed. Picking the right
-        # meaning only counts when it was instant. Judgment is left out: two options make a
-        # fast right answer a coin flip.
-        self.assertTrue(logic.suggests_mastering('typing', True, seconds=99))
-        self.assertTrue(logic.suggests_mastering('choice', True, seconds=1.2))
-        self.assertTrue(logic.suggests_mastering('listening', True, seconds=logic.MASTERED_WINDOW_SECONDS))
-        self.assertFalse(logic.suggests_mastering('choice', True, seconds=3.1))
-        self.assertFalse(logic.suggests_mastering('cloze', True, seconds=None))
-        self.assertFalse(logic.suggests_mastering('judgment', True, seconds=0.1))
-        self.assertFalse(logic.suggests_mastering('typing', False, seconds=0.5))
-        self.assertFalse(logic.suggests_mastering('typing', True, hints=1))
-        self.assertFalse(logic.suggests_mastering('typing', True, incorrect_letters=1))
-        self.assertFalse(logic.suggests_mastering('typing', True, failed_checks=1))
-        self.assertFalse(logic.suggests_mastering('unknown-mode', True, seconds=0.1))
-
     def test_mastering_suspends_the_card_and_tags_the_note(self):
         # "I already know this" has to leave the study range without writing a rating.
         # Suspend is the reversible lever every card query already honours; the tag is
@@ -994,10 +978,6 @@ class SpellingHintGrading(unittest.TestCase):
         self.assertEqual(logic.suggested_ease(True, 1, 0), 2)
         self.assertEqual(logic.suggested_ease(True, 0, 0, 0, 'typing'), 4)
         self.assertEqual(logic.suggested_ease(True, 1, 3, 0, 'typing'), 1)
-
-    def test_any_hint_at_all_stops_being_mastered(self):
-        self.assertTrue(logic.suggests_mastering('typing', True, hints=0))
-        self.assertFalse(logic.suggests_mastering('typing', True, hints=1))
 
 
 if __name__ == '__main__':

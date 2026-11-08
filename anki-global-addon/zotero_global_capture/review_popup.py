@@ -29,7 +29,7 @@ except ImportError:
     from PyQt6.QtCore import QPoint, QRect
 
 from .review_logic import (answer_report, answer_matches, BOOK_LABEL_SOURCES, clean_detail, clean_text, cloze_sentence, collection_plan, EASE_NAMES, end_of_session_reason, example_groups, exam_word_labels, format_meaning, grading_log_line, link_example_html, literature_example_html, masked_example, mask_answer_clues, meaning_table, next_check_delay, plan_limits_new, root_detail_html,
-                           next_hint_index, prepare_question, hint_share, book_availability, book_label, book_progress, book_suspended, due_outside_book, selected_mode_labels, selection_entries, selection_summary, study_state_label, show_examples, STUDY_STATE_NOTES, MASTERED_TAG, mark_mastered, meaning_markers, session_batch_size, should_style_card, spelling_hint, letter_hint_label, phonetic_available, pulse_bright, spoken_examples, submit_review, suggested_ease, suggests_mastering, today_remaining, updated_session_target, window_wait)
+                           next_hint_index, prepare_question, hint_share, book_availability, book_label, book_progress, book_suspended, due_outside_book, selected_mode_labels, selection_entries, selection_summary, study_state_label, show_examples, STUDY_STATE_NOTES, meaning_markers, session_batch_size, should_style_card, spelling_hint, letter_hint_label, phonetic_available, pulse_bright, spoken_examples, submit_review, suggested_ease, today_remaining, updated_session_target, window_wait)
 from . import morphology, word_relations, speech, motion_view
 from . import card_motion
 from .card_motion import tier_for
@@ -106,9 +106,8 @@ QPushButton#primary { background: #5668ca; color: white; border: none; text-alig
 QPushButton#primary:hover { background: #4557b5; }
 /* The suggestion is an outline, so it reads as "Enter would use this" rather than
    "this is already decided". Only the button the user actually picks fills in. */
-QPushButton#suggest, QPushButton#suggestMastered { background: #eef2ff; color: #27344d; border: 1px solid #8996e8; text-align: center; }
-QPushButton#suggest:hover, QPushButton#suggest:focus,
-QPushButton#suggestMastered:hover, QPushButton#suggestMastered:focus { background: #e3eafd; border-color: #5668ca; }
+QPushButton#suggest { background: #eef2ff; color: #27344d; border: 1px solid #8996e8; text-align: center; }
+QPushButton#suggest:hover, QPushButton#suggest:focus { background: #e3eafd; border-color: #5668ca; }
 QPushButton#chosen { background: #5668ca; color: white; border: 1px solid #4557b5; text-align: center; font-weight: 600; }
 QPushButton#chosen:disabled { background: #5668ca; color: white; }
 QPushButton#secondary { background: transparent; border: none; color: #728096; text-align: center; }
@@ -480,7 +479,6 @@ def set_topmost_band(window, pinned):
 
 
 class ReviewDialog(QDialog):
-    mastered = pyqtSignal(object)
     pin_changed = pyqtSignal(bool)
     # 回看上一张: the card asks, the controller decides — only it knows what was already
     # answered, and a look-back must never reach the scheduler.
@@ -535,7 +533,6 @@ class ReviewDialog(QDialog):
         self.keyboard = input_mode.ThreadKeyboardLayout()
         self.finished.connect(lambda _result: self.keyboard.restore())
         self.enter_ease = None
-        self.enter_mastered = False
         self.answer_seconds = None
         self.shown_at = None
         self.grading = False
@@ -901,7 +898,7 @@ class ReviewDialog(QDialog):
         grade_layout = QHBoxLayout(self.grade_widget)
         grade_layout.setContentsMargins(0, 0, 0, 0)
         # Centred, so the empty gap to the left of A. Again equals the one to the right of
-        # E. Mastered rather than all of it piling up on one side.
+        # D. Easy rather than all of it piling up on one side.
         grade_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self.grade_buttons = []
         for letter, (caption, ease) in enumerate((('Again', 1), ('Hard', 2), ('Good', 3), ('Easy', 4))):
@@ -913,17 +910,6 @@ class ReviewDialog(QDialog):
             self.grade_buttons.append(button)
             grade_layout.addWidget(button)
         self.label_grade_buttons()
-        # "I already know this" rides in the rating row, right of Easy, on E: it is the
-        # same decision the row is for, and one click shorter than suspending by hand.
-        self.mastered_button = QPushButton('E. Mastered')
-        self.mastered_button.setObjectName('mastered')
-        size_rating_button(self.mastered_button)
-        self.size_grade_button(self.mastered_button)
-        self.mastered_button.setAccessibleName('标记为已掌握并停止学习')
-        self.mastered_button.setToolTip('按 E 挂起这张卡（Anki 的 Suspend），释义和复习历史都不动；'
-                                        '搜 tag:%s 可以批量找回' % MASTERED_TAG)
-        self.mastered_button.clicked.connect(lambda: self.mastered.emit(self))
-        grade_layout.addWidget(self.mastered_button)
         self.grade_widget.hide()
         layout.addWidget(self.grade_widget)
         self.later = QPushButton('稍后再说')
@@ -998,7 +984,7 @@ class ReviewDialog(QDialog):
     def fit_card_width(self):
         """Widen the card once, at birth, so nothing on it has to be clipped.
 
-        Two rows decide the width: the five ratings, which share one line, and the
+        Two rows decide the width: the four ratings, which share one line, and the
         word-list pills, which are never allowed to be squeezed. Measuring with the dialog's
         font was not enough — the stylesheet paints the buttons with its own family, and the
         row came out narrower than its own text on the real machine while every offscreen
@@ -1006,7 +992,7 @@ class ReviewDialog(QDialog):
         and `ensure_row_fits()` re-checks the row once it is actually on screen.
         """
         row = self.grade_widget.layout()
-        buttons = [button for button in self.grade_buttons + [self.mastered_button] if button.text()]
+        buttons = [button for button in self.grade_buttons if button.text()]
         for button in buttons:
             button.ensurePolished()
             button.setMinimumWidth(QFontMetrics(button.font()).horizontalAdvance(button.text()) + 26)
@@ -1115,7 +1101,7 @@ class ReviewDialog(QDialog):
         # Re-measure with the fonts the buttons actually have now that they are on screen:
         # a hidden widget's size hint is computed before the stylesheet's face has fully
         # reached it, and every width settled at birth has come out short because of that.
-        for button in self.visible_grade_buttons() + [self.mastered_button]:
+        for button in self.visible_grade_buttons():
             if button.text() and not button.isHidden():
                 self.size_grade_button(button)
         laid = self.layout().totalSizeHint().width()
@@ -1147,7 +1133,7 @@ class ReviewDialog(QDialog):
     def showEvent(self, event):
         super().showEvent(event)
         # English for the whole life of the card, in every question type: A–D on a choice
-        # card and A–E / F / P on the answer face are letter keys, and a Chinese input method
+        # card and A–D / F / P on the answer face are letter keys, and a Chinese input method
         # in the way of those is the same failure the spelling boxes had, in a different
         # costume. Handed back in `hideEvent`, which the handover also triggers.
         self.keyboard.enable()
@@ -1615,10 +1601,6 @@ class ReviewDialog(QDialog):
             return True
         if (not self.answer_shown and self.choice_buttons and event.type() == QEvent.Type.KeyPress
                 and event.modifiers() == Qt.KeyboardModifier.NoModifier):
-            if event.key() == Qt.Key.Key_E:
-                self.mastered.emit(self)
-                event.accept()
-                return True
             index = event.key() - Qt.Key.Key_A
             if 0 <= index < len(self.choice_buttons):
                 self.choice_buttons[index].click()
@@ -1640,13 +1622,9 @@ class ReviewDialog(QDialog):
                 event.accept()
                 return True
             if self.showing_front:
-                # Reading the prompt back is not a moment to rate it, so A–E and Enter stay
+                # Reading the prompt back is not a moment to rate it, so A–D and Enter stay
                 # inert while the front is up.
                 return super().eventFilter(watched, event)
-            if event.key() == Qt.Key.Key_E:
-                self.mastered.emit(self)
-                event.accept()
-                return True
             index = event.key() - Qt.Key.Key_A
             if 0 <= index < 4 and self.grade_with_letter(index):
                 event.accept()
@@ -1655,8 +1633,8 @@ class ReviewDialog(QDialog):
                 and event.modifiers() == Qt.KeyboardModifier.NoModifier
                 and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space)):
             # Space is the same key as Enter here, and deliberately so: it used to fall
-            # through to Qt and activate whatever button happened to hold focus, which on one
-            # question type meant 已掌握 and on another meant the speaker (measured 2026-11-05).
+            # through to Qt and activate whatever button happened to hold focus, which on
+            # one question type meant the speaker (measured 2026-11-05).
             # Reading the prompt back is not a moment to answer, so the look-back keeps both
             # keys inert and leaves Space to the letter boxes, where a 词组 may need one.
             if self.showing_front:
@@ -1664,11 +1642,7 @@ class ReviewDialog(QDialog):
             if self.grading:
                 event.accept()
                 return True
-            if self.enter_mastered:
-                # Enter does what the status line just recommended: a flawless spelling
-                # means the word is already known, so it is suspended rather than graded.
-                self.mastered.emit(self)
-            elif self.enter_ease is not None:
+            if self.enter_ease is not None:
                 self.start_grade(self.enter_ease)
             event.accept()
             return True
@@ -1681,10 +1655,6 @@ class ReviewDialog(QDialog):
         # cannot live there.
         if (self.question['mode'] == 'speaking' and not self.answer_shown
                 and event.modifiers() == Qt.KeyboardModifier.NoModifier):
-            if event.key() == Qt.Key.Key_E:
-                self.mastered.emit(self)
-                event.accept()
-                return True
             if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 self.spoken_answer_button.click()
                 event.accept()
@@ -1725,7 +1695,7 @@ class ReviewDialog(QDialog):
         """Look at the question again without un-revealing the answer.
 
         The answer stays revealed as far as Anki is concerned — this is a look, not a redo —
-        so the rating row is hidden while the front is up: pressing A–E should not fire while
+        so the rating row is hidden while the front is up: pressing A–D should not fire while
         the user is only reading the prompt back. Width never changes here; only the height
         follows the content, and the top edge stays where it was.
         """
@@ -1754,7 +1724,7 @@ class ReviewDialog(QDialog):
 
         The look-back is a look. The counters are restored so the answer face reads the same
         as it did at the time, the word is not spoken again, and the rating row is replaced
-        by the footer — pressing A–E on a card that is already scheduled would either be
+        by the footer — pressing A–D on a card that is already scheduled would either be
         refused by Anki or, worse, silently re-answer it.
         """
         note = self.review_note or {}
@@ -1868,12 +1838,9 @@ class ReviewDialog(QDialog):
             self.enter_ease = None if correct is None else suggested_ease(
                 correct, self.hint_uses, self.incorrect_letters, self.failed_attempts,
                 self.question['mode'], **self.hint_record)
-            # A flawless spelling is the one answer that means "stop studying this word",
-            # so the card offers Mastered as the suggestion and puts the cursor on E.
+            # The clock is evidence for the tooltip on the non-spelling modes; since E was
+            # retired it no longer decides anything by itself.
             self.answer_seconds = None if self.shown_at is None else time.monotonic() - self.shown_at
-            self.enter_mastered = correct is not None and suggests_mastering(
-                self.question['mode'], correct, self.hint_uses, self.incorrect_letters,
-                self.failed_attempts, self.answer_seconds)
             self.hide_front()
             shown = syllable_display(self.question['word'])
             self.answer_word.setText(shown)
@@ -1928,14 +1895,10 @@ class ReviewDialog(QDialog):
             self.answer_scroll.show()
             self.force_again = correct is False
             for index, button in enumerate(self.grade_buttons, 1):
-                button.setObjectName('' if self.enter_mastered else
-                                     ('suggest' if index == self.enter_ease else ''))
+                button.setObjectName('suggest' if index == self.enter_ease else '')
                 button.style().unpolish(button)
                 button.style().polish(button)
-            self.mastered_button.setObjectName('suggestMastered' if self.enter_mastered else 'mastered')
-            self.mastered_button.style().unpolish(self.mastered_button)
-            self.mastered_button.style().polish(self.mastered_button)
-            rating_name = 'Mastered' if self.enter_mastered else {1: 'Again', 2: 'Hard', 3: 'Good', 4: 'Easy'}.get(self.enter_ease)
+            rating_name = {1: 'Again', 2: 'Hard', 3: 'Good', 4: 'Easy'}.get(self.enter_ease)
             if correct is None:
                 self.status.setText('请听发音并选择评分；此题不会自动识别或上传语音。')
             elif not correct:
@@ -1952,9 +1915,6 @@ class ReviewDialog(QDialog):
                 self.status.setText(line)
                 self.status.setToolTip(detail)
             self.grade_widget.show()
-            if self.enter_mastered:
-                # The cursor moves to E so that Enter does what the line just said.
-                self.mastered_button.setFocus()
             if self.force_again:
                 # A wrong answer may only record Again, then offers 继续学习; the other
                 # three eases would invite a rating Anki is not allowed to take.
@@ -2014,7 +1974,7 @@ class ReviewDialog(QDialog):
         and what an `Ignored` policy hid from the layout's arithmetic.
         """
         buttons = [button for button in self.visible_grade_buttons()
-                   + [self.mastered_button] if button.text() and not button.isHidden()]
+                   if button.text() and not button.isHidden()]
         if not buttons:
             return 0
         row = self.grade_widget.layout()
@@ -2054,13 +2014,6 @@ class ReviewDialog(QDialog):
             button.setObjectName('chosen' if button is chosen else '')
             button.style().unpolish(button)
             button.style().polish(button)
-        if self.enter_mastered:
-            # Rating the word is a different decision from mastering it, so the
-            # recommendation stops glowing the moment the user picks one of the four.
-            self.enter_mastered = False
-            self.mastered_button.setObjectName('mastered')
-            self.mastered_button.style().unpolish(self.mastered_button)
-            self.mastered_button.style().polish(self.mastered_button)
         self.grading = True
         if self.force_again:
             ease = 1
@@ -2287,7 +2240,6 @@ class WordLookupDialog(QDialog):
 class _Signals(QObject):
     prepared = pyqtSignal(object, object, int, bool)
     saved = pyqtSignal(object, int, object)
-    mastered_done = pyqtSignal(object, str, object, object)
     graded = pyqtSignal(object, object, int, object)
     known = pyqtSignal(object, object, int)
     relations = pyqtSignal(object, object, int)
@@ -2300,7 +2252,6 @@ class DesktopReviewController:
         self.signals = _Signals()
         self.signals.prepared.connect(self._prepared)
         self.signals.saved.connect(self._saved)
-        self.signals.mastered_done.connect(self._mastered)
         self.signals.graded.connect(self._graded)
         self.signals.known.connect(self._known_ready)
         self.signals.relations.connect(self._relations_ready)
@@ -2598,7 +2549,6 @@ class DesktopReviewController:
                 # same class of bug §9.32 was about.
                 host._embedded_dialog = self.dialog
             self.dialog.finished.connect(self._closed)
-            self.dialog.mastered.connect(self._master_card)
             self.dialog.review_requested.connect(lambda _dialog=None: self.review_previous())
             self.dialog.review_back_requested.connect(lambda _dialog=None: self.review_back())
             connected = True
@@ -2765,55 +2715,6 @@ class DesktopReviewController:
         else:
             dialog.example_hint_button.setEnabled(True)
             dialog.status.setText('例句查询失败，请稍后重试。' if error else '没有找到包含该词的例句。')
-
-    def _master_card(self, dialog):
-        """Stop studying this word, the way the setting says: suspend it, or answer Easy.
-
-        The user's own judgement that a word is already known is not a review result, so the
-        default writes no rating at all: suspend is reversible and every card query here
-        already honours it, while the tag keeps the decision recoverable. The other mode
-        (「已掌握」= 按 Easy 评分) does grade — deliberately, because a word that leaves the
-        schedule is a word that will never be tested again, which is what spaced repetition
-        exists to avoid.
-        """
-        question = dict(dialog.question)
-        # A mastered card is done from the user's point of view, so it belongs in the
-        # look-back too — named for what it was, not as a rating Anki never received.
-        self.remember(dialog, 0, rating='Mastered')
-        cfg = dict(self.settings())
-        cfg['_review_exclude_card'] = self._current_reviewer_card()
-        dialog.mastered_button.setEnabled(False)
-
-        def work():
-            error = None
-            note_id = None
-            try:
-                note_id = mark_mastered(self.api, cfg, question)
-            except Exception as raised:
-                error = str(raised) or type(raised).__name__
-                self.log('mark mastered failed: %s' % type(raised).__name__)
-            self.signals.mastered_done.emit(dialog, str(question.get('word', '')), note_id, error)
-
-        # Anki's answer and tag calls go on a thread: doing them in the click handler
-        # froze the window, because the UI thread was waiting on a request that Anki
-        # itself could only serve once the UI thread came back.
-        threading.Thread(target=work, daemon=True).start()
-
-    def _mastered(self, dialog, word, note_id, error):
-        if error:
-            self.feedback('「%s」没能标记为已掌握：%s' % (word, error))
-            if self.dialog is dialog:
-                dialog.mastered_button.setEnabled(True)
-            return
-        self.log('card marked mastered: %s cid=%s nid=%s' % (word, dialog.question['card_id'], note_id))
-        self.feedback('「%s」已标记为已掌握，不会再出现。要恢复就在 Anki 浏览器搜 tag:%s，取消挂起即可。' %
-                      (word, MASTERED_TAG))
-        if self.dialog is not dialog:
-            return
-        # No rating is written, so no daily slot is spent: advance exactly the way a
-        # rating does, which paints the next card into this window instead of closing
-        # it and opening another one a second later.
-        self._advance(dialog, inflight=False)
 
     def _closed(self, _result):
         stop_speech()

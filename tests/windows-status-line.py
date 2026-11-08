@@ -80,10 +80,10 @@ for box,(_,expected) in zip(dialog.letter_boxes, dialog.letter_positions):
     box.setText(expected)
 dialog.check_input();app.processEvents()
 assert dialog.status.toolTip()=='无提示', dialog.status.toolTip()
-assert 'Mastered' in dialog.status.text(), dialog.status.text()
+assert 'Easy' in dialog.status.text(), dialog.status.text()
 dialog.deleteLater();QTest.qWait(40)
 
-# 3. A choice card keeps the clock, but in the tooltip — speed is why E was not offered.
+# 3. A choice card keeps the clock, but in the tooltip — the seconds are part of the evidence.
 dialog=card(mode='choice', word='shrimp')
 import time
 dialog.shown_at=time.monotonic()-9.2      # reveal() computes the clock from when it appeared

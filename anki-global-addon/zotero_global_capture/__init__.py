@@ -1031,16 +1031,9 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     # for one is a choice the learner makes, and it counts as a hint.
     review_show_example = QCheckBox("答案面显示例句（例句填空和「例句」提示按钮不受影响）")
     review_show_example.setChecked(bool(cfg.get("review_show_example", True)))
-    # 「已掌握」used to mean exactly one thing — suspend — which quietly contradicts spaced
-    # repetition: a parked card is never tested again. The rate mode expresses the same
-    # judgement in the scheduler's language. Default stays suspend, and switching modes does
-    # not move the cards that are already suspended; the quality report lists them instead.
-    review_mastered_action = QComboBox()
-    review_mastered_action.setObjectName('masteredAction')
-    review_mastered_action.addItem("挂起：不再出现，随时可恢复", "suspend")
-    review_mastered_action.addItem("按 Easy 评分：留在排程里，间隔由 Anki 算", "easy")
-    review_mastered_action.setCurrentIndex(max(0, review_mastered_action.findData(
-        cfg.get("review_mastered_action", "suspend") or "suspend")))
+    # The 「已掌握」button was retired on 2026-11-07, so its action dropdown left the settings
+    # page with it. The review_mastered_action key and mark_mastered stay in the code for the
+    # cards already tagged zvr_mastered; nothing writes the setting from the UI any more.
     review_auto_example = QComboBox()
     for label, value in (("第一条例句", "first"), ("不自动朗读", "off"), ("普通例句", "example"), ("权威例句", "authority"), ("所有例句", "all")):
         review_auto_example.addItem(label, value)
@@ -1182,7 +1175,6 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     form.addRow("自动发音", review_auto_word)
     form.addRow("字母提示发音", review_hint_audio)
     form.addRow(review_show_example)
-    form.addRow("「已掌握」按钮", review_mastered_action)
     form.addRow("例句发音", review_auto_example)
     form.addRow("朗读音量", volume_widget)
     volume_help = QLabel("100% 表示什么都不改。高于 100% 时，插件会用同一套系统语音把单词重新录一遍，"
@@ -1369,7 +1361,6 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
                 "review_auto_word": review_auto_word.isChecked(),
                 "review_hint_audio": review_hint_audio.isChecked(),
                 "review_show_example": review_show_example.isChecked(),
-                "review_mastered_action": review_mastered_action.currentData(),
                 "review_auto_example_mode": review_auto_example.currentData(),
                 "review_volume": review_volume.value(),
                 "review_smart": review_smart.isChecked(),

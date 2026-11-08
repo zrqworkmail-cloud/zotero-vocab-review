@@ -66,14 +66,13 @@ for theme in ('light','dark'):
   assert abs(old.height()-ctl.dialog.layout().sizeHint().height())<=24,(
       old.height(),ctl.dialog.layout().sizeHint().height())
   current=ctl.dialog; old.resize(old.width()+10,old.height()+10);app.processEvents();assert current.geometry()==old.rect()
-  ratings=[];mastered=[];current.grade=lambda _d,ease:ratings.append(ease)
-  current.mastered.connect(lambda card: mastered.append(card.question['card_id']))
+  ratings=[];current.grade=lambda _d,ease:ratings.append(ease)
   current.reveal(True);app.processEvents()
-  # Enter does what the card recommended. A flawless spelling recommends Mastered, not a
-  # rating, so the row must not record one. (A/B/C/D still rate the card; that is pinned in
+  # Enter does what the card recommended. A flawless spelling recommends Easy since
+  # E/已掌握 was retired. (A/B/C/D still rate the card; that is pinned in
   # windows-grading-letters.py.)
   QTest.keyClick(current,Qt.Key.Key_Return);app.processEvents();QTest.qWait(60)
-  assert mastered==[current.question['card_id']] and ratings==[],(mastered,ratings)
+  assert ratings==[4],ratings
   if ctl.dialog is not None:
     ctl.dialog.close()
   app.processEvents();assert not old.isVisible() and ctl.dialog is None

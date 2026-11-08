@@ -43,8 +43,9 @@ from zotero_global_capture import review_popup as rp
 for theme in ('light','dark'):
     style=rp.popup_style({'review_theme':theme})
     assert 'QWidget#choice {' in style and 'border: 1px solid' in style, theme
-    # 已掌握 is a peer of the rating buttons, so it must not carry its own colours.
-    assert 'QPushButton#mastered' not in style, (theme, '已掌握 takes the default button colours')
+    # E/已掌握 was retired on 2026-11-07: no stylesheet rule may resurrect its own colours.
+    assert 'QPushButton#mastered' not in style, (theme, 'the retired 已掌握 button must stay gone')
+    assert 'suggestMastered' not in style, (theme, 'its suggestion highlight must stay gone too')
 assert row.letter_label.text()=='A' and row.letter_label.width()==18,(row.letter_label.text(),row.letter_label.width())
 assert row.text_label.wordWrap() and row.text_label.text()==long_meaning,row.text_label.text()
 assert '…' not in row.text_label.text(),'the option is still being truncated'

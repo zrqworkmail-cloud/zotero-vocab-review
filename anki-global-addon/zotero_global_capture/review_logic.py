@@ -244,15 +244,11 @@ def answer_matches(expected, actual):
 
 
 # Question modes are not equally strong evidence. Producing the spelling is the hardest
-# class, so a slip there counts more and a flawless run counts as "already known";
+# class, so a slip there counts more and a flawless run earns the strongest rating;
 # recognising a meaning among four options is the weakest, so its slips are forgiven.
 MODE_DIFFICULTY = {'typing': 3, 'cloze': 2, 'reverse': 2, 'listening': 1, 'speaking': 1,
                    'choice': 1, 'judgment': 1}
 MODE_WEIGHT = {mode: {1: 0.8, 2: 1.2, 3: 1.5}[difficulty] for mode, difficulty in MODE_DIFFICULTY.items()}
-# Answering one of these inside the window is what turns a right answer into "already
-# known"; 判断题 is excluded because two options make a fast answer a coin flip.
-MASTERED_WINDOW_SECONDS = 3.0
-MASTERED_TIMED_MODES = frozenset(('choice', 'reverse', 'listening', 'speaking', 'cloze'))
 
 
 def letter_weight(index):
@@ -356,26 +352,11 @@ def suggested_ease(correct, hints=0, incorrect_letters=0, failed_checks=0, mode=
     return min(caps)
 
 
-def suggests_mastering(mode, correct, hints=0, incorrect_letters=0, failed_checks=0, seconds=None):
-    """When an answer is proof the word is already known, not just recalled this time.
+# suggests_mastering lived here until 2026-11-07, when the user retired the E/已掌握
+# button: every answer is graded A–D again, and a flawless spelling simply earns Easy.
+# mark_mastered below stays for the cards already tagged zvr_mastered.
 
-    Producing the spelling of the base form is its own evidence, so it needs no clock.
-    Picking the right meaning out of options is only convincing when it was instant, so
-    those modes have to answer inside the window. Judgment cards are left out entirely:
-    with two options a fast right answer is a coin flip that got lucky.
-    """
-    if not correct or hints or incorrect_letters or failed_checks:
-        return False
-    if mode == 'judgment':
-        return False
-    if mode == 'typing':
-        return True
-    if mode in MASTERED_TIMED_MODES:
-        return seconds is not None and seconds <= MASTERED_WINDOW_SECONDS
-    return False
-
-
-ANSWER_KEY_HINT = 'A–E 改评 · Shift+F 看题 · P 回看'
+ANSWER_KEY_HINT = 'A–D 改评 · Shift+F 看题 · P 回看'
 
 
 def show_examples(cfg, mode):

@@ -211,17 +211,15 @@ for tier in (1, 2, 3, 4):
          270 + (geo['stars_top'] - 270) * POP, word_band[1])
 
 # 4. Motion does not block paging: Enter during the celebration still grades. A flawless
-#    spelling routes Enter to the mastered path (E is the mastered button), so listen for
-#    both — what matters is that the keystroke arrives at all.
+#    spelling recommends Easy, so that is the rating the keystroke must record.
 dialog = card()
 recorded = []
 dialog.grade = lambda _dialog, ease: recorded.append(('grade', ease))
-dialog.mastered.connect(lambda _dialog=None: recorded.append(('mastered', None)))
 spell(dialog)
 assert dialog.celebration.active(), 'the celebration should still be running here'
 QTest.keyClick(dialog, Qt.Key.Key_Return)
 run(60)
-assert recorded, 'Enter must reach the rating path while the badge is on screen'
+assert recorded == [('grade', 4)], 'Enter must reach the rating path while the badge is on screen: %s' % recorded
 
 # 5. A wrong answer celebrates nothing, and neither does any other question type.
 dialog = card()
@@ -265,7 +263,7 @@ assert not dialog.celebration.active(), 'and its animation must be stopped, not 
 
 # 8. The look-back must never celebrate again.
 dialog = card()
-dialog.review_note = {'correct': True, 'rating': 'Mastered', 'hint_uses': 0,
+dialog.review_note = {'correct': True, 'rating': 'Easy', 'hint_uses': 0,
                       'incorrect_letters': 0, 'failed_attempts': 0}
 dialog.enter_review()
 assert dialog.celebration is None, '回看 is a look, not an award'

@@ -48,11 +48,9 @@ ReviewDialog.speak_many=lambda self,texts: SPOKEN.append(tuple(texts)) or True
 # ---------------------------------------------------------------------------
 # Space on the answer face must mean "take the rating this card just
 # recommended", the same thing Enter means, and must stop meaning "whatever
-# button happens to hold focus" (measured 2026-11-05: it clicked Mastered on one
-# question type and the speaker on another).  During a look-back (F) neither key
-# may answer the card.
+# button happens to hold focus" (measured 2026-11-05: it clicked the speaker on
+# one question type).  During a look-back (Shift+F) neither key may answer the card.
 GRADED = []
-MASTERED = []
 
 
 def built(mode, word='hazardous'):
@@ -61,7 +59,6 @@ def built(mode, word='hazardous'):
     if mode == 'judgment':
         question.update(options=['A', 'B'], judgment_statement=MEANING, judgment_correct=True)
     dialog = ReviewDialog(question, 'center', lambda *a: GRADED.append(a), dict(CFG))
-    dialog.mastered.connect(lambda _d: MASTERED.append(mode))
     dialog.show(); QTest.qWait(60); app.processEvents()
     return dialog
 
@@ -81,16 +78,15 @@ def outcome(mode, key, look_back=False):
     """One card, one key: what the card did, plus what it said it would do."""
     dialog = built(mode)
     to_answer(dialog, mode)
-    suggested = (dialog.enter_ease, dialog.enter_mastered)
+    suggested = dialog.enter_ease
     if look_back:
         QTest.keyClick(dialog, Qt.Key.Key_F, Qt.KeyboardModifier.ShiftModifier)
         app.processEvents(); QTest.qWait(40)
         assert dialog.showing_front, ('Shift+F must show the question again', mode)
-    del GRADED[:]; del MASTERED[:]; del SPOKEN[:]
+    del GRADED[:]; del SPOKEN[:]
     QTest.keyClick(dialog.focusWidget() or dialog, key)
     app.processEvents(); QTest.qWait(40); app.processEvents()
-    result = {'graded': [entry[-1] for entry in GRADED], 'mastered': bool(MASTERED),
-
+    result = {'graded': [entry[-1] for entry in GRADED],
               'spoken': bool(SPOKEN),
               'front': dialog.showing_front, 'suggested': suggested}
     dialog.deleteLater(); QTest.qWait(40)
@@ -100,21 +96,19 @@ def outcome(mode, key, look_back=False):
 for mode in ('choice', 'reverse', 'judgment', 'typing', 'cloze', 'listening'):
     enter = outcome(mode, Qt.Key.Key_Return)
     space = outcome(mode, Qt.Key.Key_Space)
-    assert space['graded'] == enter['graded'] and space['mastered'] == enter['mastered'], \
+    assert space['graded'] == enter['graded'], \
         ('space must do exactly what enter does', mode, enter, space)
-    ease, mastered = enter['suggested']
-    if mastered:
-        assert enter['mastered'] and not enter['graded'], ('Enter must suspend', mode, enter)
-    elif ease is not None:
-        assert enter['graded'] == [ease] and not enter['mastered'], \
+    ease = enter['suggested']
+    if ease is not None:
+        assert enter['graded'] == [ease], \
             ('the suggestion and the key must agree', mode, ease, enter['graded'])
     assert len(enter['graded']) <= 1, ('one key must not grade twice (focus + rule)', mode, enter)
     assert not enter['spoken'], ('space must not fall through to the speaker', mode, enter)
     back = outcome(mode, Qt.Key.Key_Space, look_back=True)
-    assert back['front'] and not back['graded'] and not back['mastered'], \
+    assert back['front'] and not back['graded'], \
         ('a look-back answers nothing, with either key', mode, back)
     back_enter = outcome(mode, Qt.Key.Key_Return, look_back=True)
-    assert back_enter['front'] and not back_enter['graded'] and not back_enter['mastered'], \
+    assert back_enter['front'] and not back_enter['graded'], \
         ('enter must stay inert during a look-back too', mode, back_enter)
 
 dialog = built('typing')

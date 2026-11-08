@@ -37,8 +37,8 @@ cfg={'review_auto_word':False,'review_auto_example_mode':'off','review_hint_audi
 def card(cid, word): return {'kind':'due','card_id':cid,'mode':'typing','word':word,'meaning':'释义',
                              'example':'','literature':'','options':[],'phonetic':'/straɪv/','snapshot':{}}
 
-# 1. The rating row speaks Anki's own words with the key in front of them, and 已掌握
-#    is the fifth of them.
+# 1. The rating row speaks Anki's own words with the key in front of them — four of
+#    them since E/已掌握 was retired on 2026-11-07.
 dialog=ReviewDialog(card(1,'strive'),'center',lambda *_a:None,cfg)
 dialog.show();QTest.qWait(60);app.processEvents();QTest.qWait(60)
 width_before=dialog.width()
@@ -47,10 +47,10 @@ dialog.check_input();app.processEvents();QTest.qWait(60)
 assert dialog.width()==width_before, \
     'the rating row must not widen the card when it appears: %d -> %d' % (width_before, dialog.width())
 texts=[dialog.grade_widget.layout().itemAt(i).widget().text() for i in range(dialog.grade_widget.layout().count())]
-assert texts==['A. Again','B. Hard','C. Good','D. Easy','E. Mastered'],texts
+assert texts==['A. Again','B. Hard','C. Good','D. Easy'],texts
 # 2026-11-05: the row is one short line now — it names the suggestion and the key, the
-# counts moved to its tooltip. What must still be true is that the line says Mastered.
-assert '建议 Mastered' in dialog.status.text(),dialog.status.text()
+# counts moved to its tooltip. A flawless spelling recommends Easy since E was retired.
+assert '建议 Easy' in dialog.status.text(),dialog.status.text()
 assert '无提示' in dialog.status.toolTip(),dialog.status.toolTip()
 assert '按 A' in dialog.grade_buttons[0].toolTip(),dialog.grade_buttons[0].toolTip()
 
@@ -98,7 +98,7 @@ for button in [b for b in dialog.findChildren(QPushButton) if b.objectName()=='s
     assert button.iconSize().width()==button.width(),\
         'the disc must fill its button: icon %d in a %d box' % (button.iconSize().width(), button.width())
 
-# 3b. The card is wide enough for all five ratings to show their whole label, and the
+# 3b. The card is wide enough for all four ratings to show their whole label, and the
 #     answer boxes keep their text in the middle instead of clinging to the top edge.
 row=dialog.grade_widget.layout()
 labels=[row.itemAt(i).widget().text() for i in range(row.count())]
@@ -114,8 +114,8 @@ assert dialog.width()>=demand+52,'the rating row needs %d px, the card is %d' % 
 
 # 3c. And on the revealed card no button may be cut. The row shares the card's width rather
 #     than widening it, so an estimate that comes in short becomes clipped text, not a
-#     wider window — which is how "E. Mastered" reached the user as ". Mastere".
-for button in [b for b in dialog.grade_buttons + [dialog.mastered_button] if b.text() and not b.isHidden()]:
+#     wider window — which is how "E. Mastered" once reached the user as ". Mastere".
+for button in [b for b in dialog.grade_buttons if b.text() and not b.isHidden()]:
     needed = QFontMetrics(button.font()).horizontalAdvance(button.text()) + 26
     assert button.width() >= needed,\
         '%r paints in %d px but needs %d' % (button.text(), button.width(), needed)
@@ -126,12 +126,13 @@ assert dialog.layout().totalMinimumSize().width() <= dialog.width(),\
     'Qt itself must agree the row fits: %d of %d' % (dialog.layout().totalMinimumSize().width(), dialog.width())
 
 # 3e. The row also has to sit symmetrically: the gap left of A. Again must equal the gap
-#     right of E. Mastered, or the row reads as shoved against one edge.
+#     right of D. Easy, or the row reads as shoved against one edge.
 first_button = dialog.visible_grade_buttons()[0]
+last_button = dialog.visible_grade_buttons()[-1]
 left_gap = first_button.mapTo(dialog, QPoint(0, 0)).x()
-right_gap = dialog.width() - dialog.mastered_button.mapTo(dialog, QPoint(dialog.mastered_button.width(), 0)).x()
-assert abs(left_gap - right_gap) <= 2, ('A gap %d, E gap %d' % (left_gap, right_gap))
-assert right_gap >= 8, 'E. Mastered must clear the edge, gap was %d' % right_gap
+right_gap = dialog.width() - last_button.mapTo(dialog, QPoint(last_button.width(), 0)).x()
+assert abs(left_gap - right_gap) <= 2, ('A gap %d, D gap %d' % (left_gap, right_gap))
+assert right_gap >= 8, 'D. Easy must clear the edge, gap was %d' % right_gap
 
 # 3d. And when the row does need more than the card has, the card adapts rather than cutting
 #     the last button. The birth minimum is only an estimate, so force the window narrower
@@ -207,4 +208,4 @@ assert fresh.pin_button.isChecked(),'the button must show the state the window i
 assert cfg['review_pin'] is True,'the toggle must not be written back to the settings'
 fresh.close()
 
-print('Qt: ratings read A. Again … E. Mastered, the card is a taskbar window, the pin is a drawn pushpin that moves the band, and unpin works on the flipped card')
+print('Qt: ratings read A. Again … D. Easy, the card is a taskbar window, the pin is a drawn pushpin that moves the band, and unpin works on the flipped card')

@@ -19,11 +19,11 @@ class ShortLine(unittest.TestCase):
     def test_the_line_names_the_suggestion_and_the_keys_and_nothing_else(self):
         short, detail = module.answer_report('发音提示 2 次', incorrect_letters=6,
                                              failed_checks=0, rating='Again')
-        self.assertEqual(short, '建议 Again（回车/空格）· A–E 改评 · Shift+F 看题 · P 回看')
+        self.assertEqual(short, '建议 Again（回车/空格）· A–D 改评 · Shift+F 看题 · P 回看')
 
-    def test_mastered_is_spelled_the_way_the_button_spells_it(self):
-        short, _detail = module.answer_report('无提示', rating='Mastered')
-        self.assertIn('建议 Mastered', short)
+    def test_the_suggestion_is_spelled_the_way_the_button_spells_it(self):
+        short, _detail = module.answer_report('无提示', rating='Easy')
+        self.assertIn('建议 Easy', short)
 
     def test_the_line_fits_one_row_of_the_card(self):
         short, _ = module.answer_report('发音提示 3 次，字母提示 5/14（按位置已给出 31%），'
@@ -31,9 +31,9 @@ class ShortLine(unittest.TestCase):
                                         failed_checks=4, rating='Hard', seconds=12.3,
                                         show_seconds=True)
         # 40 was the old budget; 看题 moved to Shift+F on 2026-11-06 and the longest variant
-        # (Mastered) is now 46 characters. The bound is a stand-in for "one row", and the row
-        # is measured for real by tests/windows-status-line.py, which checks every variant
-        # including Mastered against the label's own height. 48 = the measured 46 plus slack.
+        # (with seconds) is 46 characters. The bound is a stand-in for "one row", and the row
+        # is measured for real by tests/windows-status-line.py against the label's own height.
+        # 48 = the measured 46 plus slack.
         self.assertLessEqual(len(short), 48)
 
 
@@ -55,9 +55,9 @@ class DetailLine(unittest.TestCase):
         self.assertIn('检查失败 3 次', detail)
 
     def test_the_clock_shows_only_when_it_is_part_of_the_evidence(self):
-        # Spelling needs no clock; the other modes do, because a 9.2 秒 answer is why E
-        # was not offered.
-        _short, spelling = module.answer_report('无提示', rating='Mastered', seconds=1.1,
+        # Spelling needs no clock; the other modes do, because the seconds are part of
+        # why the suggestion is what it is.
+        _short, spelling = module.answer_report('无提示', rating='Easy', seconds=1.1,
                                                 show_seconds=False)
         _short, choice = module.answer_report('无提示', rating='Easy', seconds=9.2,
                                               show_seconds=True)
@@ -65,9 +65,9 @@ class DetailLine(unittest.TestCase):
         self.assertIn('用时 9.2 秒', choice)
 
     def test_a_flawless_answer_still_says_so(self):
-        # 「无提示」 is not a zero count — it is the reason the suggestion is Mastered,
+        # 「无提示」 is not a zero count — it is the reason the suggestion is Easy,
         # and an empty tooltip would lose it.
-        _short, detail = module.answer_report('无提示', rating='Mastered')
+        _short, detail = module.answer_report('无提示', rating='Easy')
         self.assertEqual(detail, '无提示')
 
 

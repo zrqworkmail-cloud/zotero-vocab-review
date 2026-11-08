@@ -55,19 +55,19 @@ def evidence(dialog):
     return dialog.status.toolTip()
 
 
-# 1. Baseline of the user's rule: 一次性写对、没碰提示 → the card recommends Mastered.
+# 1. Baseline of the user's rule: 一次性写对、没碰提示 → the card recommends Easy, the
+#    strongest of the four ratings since E/已掌握 was retired on 2026-11-07.
 dialog = spell_right(card('characteristic'))
-assert dialog.enter_mastered is True and dialog.enter_ease == 4, (dialog.enter_mastered, dialog.enter_ease)
+assert dialog.enter_ease == 4, dialog.enter_ease
 # 「无提示」 is evidence, not a zero count, so it still exists — but the row is short now
 # and the evidence lives in its tooltip (learner's choice, 2026-11-05).
 assert '无提示' in dialog.status.toolTip(), dialog.status.toolTip()
-assert '建议 Mastered' in dialog.status.text(), dialog.status.text()
+assert '建议 Easy' in dialog.status.text(), dialog.status.text()
 
-# 2. One listen is nearly free: 用户点名它应当仍然建议 Easy, and it is no longer Mastered.
+# 2. One listen is nearly free: 用户点名它应当仍然建议 Easy.
 dialog = card('characteristic')
 dialog.hear_hint(['characteristic'])
 spell_right(dialog)
-assert dialog.enter_mastered is False, 'a hint, however light, is not a blind recall'
 assert dialog.enter_ease == 4, ('one audio hint stays Easy', dialog.enter_ease)
 assert '发音提示 1 次' in evidence(dialog), evidence(dialog)
 assert '建议 Easy' in dialog.status.text(), dialog.status.text()

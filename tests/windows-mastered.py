@@ -1,4 +1,11 @@
-import os,sys,types,threading,time
+"""E/已掌握 was retired on 2026-11-07: the rating row is A–D again.
+
+The user stopped using Mastered — every old suspended card was migrated to Easy — so the
+card no longer offers the button, the E key does nothing on either face, and a flawless
+spelling recommends Easy like any other clean answer. The backend (mark_mastered, the
+zvr_mastered tag, the setting) stays for history; this file only guards the card itself.
+"""
+import os,sys,types,time
 base=r'D:\Program Files (x86)\Anki\app_packages'
 sys.path.insert(0,base)
 os.environ['PATH']=';'.join([os.path.join(base,'PyQt6','Qt6','bin'),os.path.dirname(base),os.path.join(os.environ['SystemRoot'],'System32'),os.environ['SystemRoot']])
@@ -17,6 +24,7 @@ sys.modules['aqt']=aqt;sys.modules['aqt.qt']=qt
 package=types.ModuleType('zotero_global_capture');package.__path__=[os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'anki-global-addon', 'zotero_global_capture'))];sys.modules['zotero_global_capture']=package
 from zotero_global_capture.review_popup import ReviewDialog, DesktopReviewController
 from zotero_global_capture import review_popup as rp
+from zotero_global_capture import review_logic as rl
 
 
 from PyQt6.QtTest import QTest
@@ -31,139 +39,84 @@ def card(cid, word, meaning):
     return {'kind':'new','card_id':cid,'mode':'typing','word':word,'meaning':meaning,
             'example':'','literature':'','options':[],'snapshot':{}}
 
-# The next card is already prepared, so mastering rolls straight on to it.
-real_prepare=rp.prepare_question
-rp.prepare_question=lambda api, config, mode='mixed', rng=None, due_only=False: card(98,'later','稍后')
-rp.collection_plan=lambda api, config, *a, **k: {'batch':1,'new_remaining':1,'goal':10,'done':1,'due':0}
-
-def controller(notes, calls, gate=None):
+def controller(notes, calls):
     def api(action, params=None):
         calls.append((action, params or {}))
         if action == 'cardsInfo':
             return [{'cardId': params['cards'][0], 'note': 7}]
-        if action == 'suspend' and gate is not None:
-            gate.wait(5)
         return True
     ctl=DesktopReviewController(lambda:cfg, api, lambda message,*a: notes.append(str(message)), lambda *a:None)
     ctl._lookup_known_words=lambda *a:None;ctl._lookup_relations=lambda *a:None;ctl.schedule=lambda **kw:None
-    # A group of three: mastering one card must not look like the end of the session.
     ctl.session_target=3
-    return ctl
+    graded=[]
+    # The real save path talks to Anki's scheduler; here the decision itself is the subject.
+    ctl._grade=lambda dialog,ease: graded.append(ease)
+    return ctl, graded
 
-# 1. The button is a short one, sitting right of 很容易 in the rating row.
+# 1. The row is four ratings, A–D, and nothing else. No button, no signal, no attribute.
 notes=[];calls=[]
-ctl=controller(notes, calls)
+ctl,graded=controller(notes, calls)
 ctl._prepared(card(99,'yield','出产'), None, ctl.generation, True)
 QTest.qWait(60);app.processEvents();QTest.qWait(60)
 dialog=ctl.dialog
-assert not dialog.mastered_button.isVisible(),'it belongs to the rating row, which is hidden until the answer'
 dialog.reveal(True);app.processEvents();QTest.qWait(60)
-assert dialog.mastered_button.isVisible(),'the card needs a 已掌握 action'
-assert dialog.mastered_button.text()=='E. Mastered',dialog.mastered_button.text()
 row=dialog.grade_widget.layout()
-assert dialog.mastered_button.parent() is dialog.grade_widget,dialog.mastered_button.parent()
-assert row.indexOf(dialog.mastered_button)==row.indexOf(dialog.grade_buttons[3])+1,row.indexOf(dialog.mastered_button)
+texts=[row.itemAt(i).widget().text() for i in range(row.count()) if row.itemAt(i).widget()]
+assert texts==['A. Again','B. Hard','C. Good','D. Easy'],texts
+assert not hasattr(dialog,'mastered_button'),'the 已掌握 button is retired'
+assert not hasattr(ReviewDialog,'mastered'),'no signal may reach a mastering path'
+assert not hasattr(dialog,'enter_mastered'),'the suggestion is a rating again, not mastering'
+assert 'A–D' in rl.ANSWER_KEY_HINT and 'A–E' not in rl.ANSWER_KEY_HINT,rl.ANSWER_KEY_HINT
+ctl.stop();app.processEvents()
 
-# 1b. A flawless spelling is the one answer that means "already known": the card
-#     recommends Mastered, and Enter does exactly that instead of grading.
-clean_notes=[];clean_calls=[]
-clean=controller(clean_notes, clean_calls)
-clean._prepared(card(90,'agile','敏捷的'), None, clean.generation, True)
-QTest.qWait(60);app.processEvents();QTest.qWait(60)
-spelling=clean.dialog
-spelling.reveal(True);app.processEvents();QTest.qWait(60)
-assert spelling.enter_mastered,'a clean typing answer must recommend mastering'
-assert '建议 Mastered' in spelling.status.text(),spelling.status.text()
-assert spelling.mastered_button.objectName()=='suggestMastered',spelling.mastered_button.objectName()
-assert not any(button.objectName()=='suggest' for button in spelling.grade_buttons),\
-    'Easy must not look recommended while Mastered is'
-QTest.keyClick(spelling, Qt.Key.Key_Return);app.processEvents();QTest.qWait(150);app.processEvents()
-assert 'suspend' in [action for action,_ in clean_calls],'Enter must do what the line recommended'
-assert 'guiAnswerCard' not in [action for action,_ in clean_calls],\
-    'Enter on a flawless spelling recorded a rating instead of mastering: %s' % [a for a,_ in clean_calls]
-
-# 1c. Recognition questions earn the same thing only when the answer was instant: inside
-#     three seconds they recommend Mastered, after that just Easy. 判断题 never earns it,
-#     however fast, because two options make a right answer a coin flip.
-choice_notes=[]
-ctl3=controller(choice_notes, [])
-ctl3._prepared(dict(card(91,'passive','被动的'), mode='choice', options=['被动的','积极的','中性的','混合的']),
-               None, ctl3.generation, True)
-QTest.qWait(60);app.processEvents();QTest.qWait(60)
-choice=ctl3.dialog
-choice.reveal(True);app.processEvents();QTest.qWait(60)
-assert choice.enter_mastered and choice.answer_seconds is not None and choice.answer_seconds <= 3.0, \
-    (choice.enter_mastered, choice.answer_seconds)
-assert '用时' in choice.status.toolTip(),choice.status.toolTip()
-choice.close();app.processEvents()
-ctl4=controller(choice_notes, [])
-ctl4._prepared(dict(card(92,'active','积极的'), mode='choice', options=['被动的','积极的','中性的','混合的']),
-               None, ctl4.generation, True)
-QTest.qWait(60);app.processEvents();QTest.qWait(60)
-slow=ctl4.dialog
-slow.shown_at=time.monotonic()-5
-slow.reveal(True);app.processEvents();QTest.qWait(60)
-assert not slow.enter_mastered,'a 5 second pick is not proof the word is already known'
-assert slow.enter_ease==4,slow.enter_ease
-slow.close();app.processEvents()
-ctl5=controller(choice_notes, [])
-ctl5._prepared(dict(card(93,'obliged','有义务的'), mode='judgment', judgment_correct=True,
-                    judgment_statement='有义务的；使感激', options=[]),
-               None, ctl5.generation, True)
-QTest.qWait(60);app.processEvents();QTest.qWait(60)
-judge=ctl5.dialog
-judge.reveal(True);app.processEvents();QTest.qWait(60)
-assert not judge.enter_mastered,'a two-option question can never earn mastering'
-judge.close();app.processEvents()
-
-# 2. Clicking it must not do the Anki work on the UI thread, and must keep the session going.
-gate=threading.Event()
-ctl2=controller(notes, calls, gate)
-ctl2._prepared(card(94,'nimble','敏捷的'), None, ctl2.generation, True)
-QTest.qWait(60);app.processEvents();QTest.qWait(60)
-blocked=ctl2.dialog
-blocked.reveal(True);app.processEvents();QTest.qWait(60)
-assert [a for a,_ in calls].count('suspend')==0,'nothing is suspended before the user says so'
-blocked.mastered_button.click()
-for _ in range(200):
-    app.processEvents(); QTest.qWait(5)
-    if ('suspend',{'cards':[94]}) in calls: break
-assert ('suspend',{'cards':[94]}) in calls,'the request should be in flight: %s' % calls
-assert ctl2.dialog is blocked,'the UI must not wait for Anki to answer before it returns'
-for _ in range(20):
-    app.processEvents(); QTest.qWait(5)
-gate.set()
-for _ in range(240):
-    app.processEvents(); QTest.qWait(5)
-    if ctl2.dialog is not blocked: break
-assert ('addTags',{'notes':[7],'tags':'zvr_mastered'}) in calls,calls
-assert 'answerCards' not in [a for a,_ in calls],'mastering must not write a rating'
-assert any('已掌握' in n for n in notes),notes
-assert any('zvr_mastered' in n for n in notes),'the message has to say how to undo it: %s' % notes
-assert ctl2.dialog is not blocked and ctl2.dialog.question['card_id']==98,(ctl2.dialog is blocked, ctl2.dialog.question['card_id'])
-# Mastering must read like a rating: the next card paints into the same window, it does
-# not close this one and reopen a new window a second later.
-assert getattr(ctl2.dialog, '_embedded', False), 'the next card must be handed over in place'
-assert ctl2.dialog.window() is blocked, (ctl2.dialog.window(), blocked)
-assert blocked.isVisible() and ctl2.dialog.isVisible()
-ctl2.stop();app.processEvents()
-
-# 3. E is the shortcut on the answer face.
+# 2. A flawless spelling recommends Easy, and Enter records that rating — no suspend,
+#    no tag, nothing that takes the word out of the schedule.
 notes=[];calls=[]
-ctl=controller(notes, calls)
+ctl,graded=controller(notes, calls)
+ctl._prepared(card(90,'agile','敏捷的'), None, ctl.generation, True)
+QTest.qWait(60);app.processEvents();QTest.qWait(60)
+spelling=ctl.dialog
+spelling.reveal(True);app.processEvents();QTest.qWait(60)
+assert spelling.enter_ease==4,spelling.enter_ease
+assert '建议 Easy' in spelling.status.text(),spelling.status.text()
+assert 'Mastered' not in spelling.status.text(),spelling.status.text()
+assert [b.objectName() for b in spelling.grade_buttons].count('suggest')==1
+QTest.keyClick(spelling, Qt.Key.Key_Return);app.processEvents();QTest.qWait(150);app.processEvents()
+assert graded==[4],graded
+assert not [a for a,_ in calls if a in ('suspend','addTags','answerCards')],calls
+ctl.stop();app.processEvents()
+
+# 3. E is inert on the answer face: it neither rates nor suspends.
+notes=[];calls=[]
+ctl,graded=controller(notes, calls)
 ctl._prepared(card(97,'difficult','困难的'), None, ctl.generation, True)
 QTest.qWait(60);app.processEvents();QTest.qWait(60)
 rated=ctl.dialog
 rated.reveal(True);app.processEvents();QTest.qWait(60)
 QTest.keyClick(rated, Qt.Key.Key_E)
 QTest.qWait(150);app.processEvents();QTest.qWait(150)
-assert ('suspend',{'cards':[97]}) in calls,calls
-assert ctl.dialog is not rated
+assert graded==[],graded
+assert not [a for a,_ in calls if a in ('suspend','addTags')],calls
+assert rated.answer_shown and not rated.grading,'E must leave the card exactly as it was'
 ctl.stop();app.processEvents()
 
-# 4. In the spelling card the letter E still belongs to the answer box.
+# 4. E is inert on a choice question's front face too: it used to suspend before answering.
 notes=[];calls=[]
-ctl=controller(notes, calls)
+ctl,graded=controller(notes, calls)
+ctl._prepared(dict(card(91,'passive','被动的'), mode='choice', options=['被动的','积极的','中性的','混合的']),
+              None, ctl.generation, True)
+QTest.qWait(60);app.processEvents();QTest.qWait(60)
+choice=ctl.dialog
+assert not choice.answer_shown
+QTest.keyClick(choice, Qt.Key.Key_E)
+app.processEvents();QTest.qWait(60)
+assert not choice.answer_shown and not choice.grading
+assert not [a for a,_ in calls if a in ('suspend','addTags')],calls
+ctl.stop();app.processEvents()
+
+# 5. In the spelling card the letter E still belongs to the answer box.
+notes=[];calls=[]
+ctl,graded=controller(notes, calls)
 ctl._prepared(card(96,'eager','渴望的'), None, ctl.generation, True)
 QTest.qWait(60);app.processEvents();QTest.qWait(60)
 spelling=ctl.dialog
@@ -171,23 +124,7 @@ spelling.letter_boxes[0].setFocus()
 QTest.keyClick(spelling.letter_boxes[0], Qt.Key.Key_E)
 app.processEvents()
 assert spelling.letter_boxes[0].text()=='e',spelling.letter_boxes[0].text()
-assert [a for a,_ in calls].count('suspend')==0,'typing an E must not master the word'
+assert graded==[] and not [a for a,_ in calls if a=='suspend']
 ctl.stop();app.processEvents()
 
-# 5. A clean spelling is the strongest evidence the card can get, so it recommends
-#    mastering; the underlying rating still reaches Easy for the weaker question types.
-notes=[];calls=[]
-ctl=controller(notes, calls)
-ctl._prepared(card(95,'difficult','困难的'), None, ctl.generation, True)
-QTest.qWait(60);app.processEvents();QTest.qWait(60)
-second=ctl.dialog
-for box,char in zip(second.letter_boxes,'difficult'): box.setText(char)
-second.check_input();app.processEvents();QTest.qWait(60)
-assert second.answer_shown and second.enter_ease==4,(second.answer_shown,second.enter_ease)
-assert second.enter_mastered,'a flawless spelling must recommend mastering'
-assert '建议 Mastered' in second.status.text(),second.status.text()
-assert not [n for n in notes if '保存' in n or '没有' in n],notes
-ctl.stop();app.processEvents()
-rp.prepare_question=real_prepare
-
-print('Qt: 已掌握 sits in the rating row on E, works off the UI thread, and rolls on to the next card')
+print('Qt: the rating row is A–D, E does nothing on either face, and a flawless spelling recommends Easy')
