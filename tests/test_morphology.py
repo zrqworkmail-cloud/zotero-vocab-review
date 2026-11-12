@@ -15,11 +15,21 @@ class MemoryAidTests(unittest.TestCase):
         self.assertEqual(''.join(pieces).lower(), 'maintenance')
         self.assertGreater(len(pieces), 1)
 
-    def test_unknown_long_word_uses_honestly_labeled_spelling_chunks(self):
-        label, pieces = morphology.spelling_chunks('abcdefghijklmno')
-        self.assertEqual(label, '拼写分块')
-        self.assertEqual(''.join(pieces), 'abcdefghijklmno')
-        self.assertGreater(len(pieces), 1)
+    def test_unknown_long_word_shows_nothing(self):
+        # The mechanical 4-letter grouping (disi·llus·ion) taught a fake pronunciation;
+        # a word the syllable sources do not cover must show no division at all.
+        self.assertIsNone(morphology.spelling_chunks('abcdefghijklmno'))
+
+    def test_supplemented_book_word_gets_real_syllables(self):
+        # disillusion was one of the 104 shipped-book words the 25k list missed; the
+        # supplement (full Moby Hyphenator II) must cover it with the same written breaks.
+        label, pieces = morphology.spelling_chunks('disillusion')
+        self.assertEqual(label, '音节分段')
+        self.assertEqual(pieces, ['dis', 'il', 'lu', 'sion'])
+
+    def test_single_syllable_word_is_not_split(self):
+        # strength is one syllable: no source divides it, so it shows nothing.
+        self.assertIsNone(morphology.spelling_chunks('strength'))
 
     def test_short_and_nonword_input_has_no_artificial_breakdown(self):
         self.assertIsNone(morphology.spelling_chunks('cat'))

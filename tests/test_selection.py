@@ -316,14 +316,26 @@ class UntaggedAnki(FakeAnki):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.actions = []
+        self.batches = []
 
     def __call__(self, action, params):
         self.actions.append(action)
         if action == 'getTags':
             return sorted({tag for _, tags in CARDS.values() for tag in tags})
         if action == 'multi':
+            self.batches.append(params['actions'])
             return [self('findCards', inner['params']) for inner in params['actions']]
         return super().__call__(action, params)
+
+    def vocabulary_batches(self):
+        # `multi` now has two users: the tag-vocabulary count and the read batching on the
+        # review path. A vocabulary batch is one findCards per tag with no stage filters;
+        # every read batch carries -is:suspended. The action name alone stopped telling
+        # them apart on 2026-11-10, so the oracle reads the payload, not the name.
+        return [batch for batch in self.batches
+                if batch and all(item['action'] == 'findCards' and
+                                 '-is:suspended' not in item['params'].get('query', '')
+                                 for item in batch)]
 
 
 class UntaggedSelection(unittest.TestCase):
@@ -387,7 +399,7 @@ class UntaggedSelection(unittest.TestCase):
         base = cfg(study_selection=[{'book': 'full', 'tags': ['高频']}])
         logic.book_progress(api, base)
         self.assertNotIn('getTags', [call for call in api.actions])
-        self.assertNotIn('multi', [call for call in api.actions])
+        self.assertEqual(api.vocabulary_batches(), [])
 
     def test_the_vocabulary_is_fetched_once_per_cfg_view(self):
         api = UntaggedAnki()
@@ -395,7 +407,7 @@ class UntaggedSelection(unittest.TestCase):
         view = logic._expand_untagged(api, base)
         logic.book_progress(api, view)
         self.assertEqual(api.actions.count('getTags'), 1)
-        self.assertEqual(api.actions.count('multi'), 1)
+        self.assertEqual(len(api.vocabulary_batches()), 1)
 
 
 class NoShadowedDefinitions(unittest.TestCase):

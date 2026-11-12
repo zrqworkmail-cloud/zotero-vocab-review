@@ -45,7 +45,14 @@ python tools/restart-anki.py --wait 300   # 等到空闲（没有卡片在屏 + 
 
 **规则：源码已改、测试通过、文件已部署、Anki 已加载、真屏已验证——五件事，不许混为一谈。** 报告进度必须分层说，说清卡在哪一层。
 
-## 3. 现在的真实状态（2026-11-05 11:46；唯一入口是 AUDIT §9.11 与 §9.13–§9.48）
+## 3. 现在的真实状态（2026-11-10；唯一入口是 AUDIT §9.11 与 §9.13–§9.51）
+
+- **这一轮（§9.50 / §9.51，#65 + #66）：代码完成、闸门全绿、文件未部署。项目正在交接给另一个 agent，所以本轮刻意没部署到用户的活 Anki——部署留作接手后的第一步。** 两件事：
+  - **#65 分词改造**：用户「去掉机械分块，我希望按照音节分」。做法是**书面音节划分**（不是按发音算、不是词根词缀）。删掉 `morphology.spelling_chunks` 的 4 字母机械兜底，查不到音节来源就 `return None`（不显示分段，绝不显示假分段）。数据三层：随包 2.5 万词表 + 补充文件第 1 段（完整版 Moby Hyphenator II 187,175 条公有领域里挑的 66 词）+ 第 2 段（37 个词典核对词 = 32 个 MW 词头点分 + 5 个写在文件头的派生）。复测：20082 键、词书缺词 104→覆盖 103（`strength` 单音节有意不分）。**MW 抓取只有 `mcp__windows_mcp__Scrape` 能过（WebFetch/curl 都 403），词头中点后带零宽空格 U+200B**；死掉 agent 的核对结果从 jsonl 顶层 `toolUseResult` 抢救（脚本 `tmp/salvage_agent_evidence.py`）。详见 §9.50。
+  - **#66 评分后卡顿**：根因是 `_next_result` 30+ 次串行往返 + `_flip` 的 `ready.wait(0.4)` 超时后**重算一遍**。修法：`_flip` 最多等 15s（死锁阀）绝不重算、预取 `try/finally` 保证 ready 被 set、`_multi` 把独立只读合并成一次 AnkiConnect `multi`（按序返回纯结果，不是 [result,error] 对）。**同一活合集复测：旧 3983ms/35 往返 → 新 ~2960–3200ms/16–17 往返**；`prepare_question` 仍是大头 ~2.4s/11–12 次、尚未完全批量（后续可继续）。「不卡」靠预取把读时藏到看答案那段时间背后，不是消成 0。详见 §9.51。
+  - **闸门**：428 unittest / 26 node / 34/34 离屏 Qt 全绿（`windows-judgment-rows` 在全量里偶发一次 33/34，单跑 3/3 与全量复跑都绿，是计时敏感的旧检查，与本轮无关）。
+  - **部署 baseline（verify-state，2026-11-10）**：19/23 文件匹配；DRIFT = `morphology.py` `review_logic.py` `review_popup.py`；`kyle_enrich.py` ABSENT（旧有、从未部署、真题合规未定，别顺手部署）；真机仍跑旧码（插件启动 2026-11-10 09:50:30）。**`verify-state` 部署层只哈希顶层 `*.py`，不查 `lexicon/`——部署后必须手动比对 `syllables_supplement.txt` 哈希，否则假绿。**
+  - **接手后第一步**：备份这三个 .py（`.bak-<stamp>`）→ 拷贝三个 .py + `lexicon/syllables_supplement.txt` → `python tools/restart-anki.py --wait 300`（托盘协议，看 `closed politely in N s`）→ verify-state 五层 + 手动核词典哈希 + 重启前后卡片计数 unchanged → 真机验收「分词是否合理」「评分后是否还卡」。
 
 - 这一轮（§9.48）：**「本组结束」不再猜原因，取卡顺序改成今日新词在前，多选词组的引擎落地（设计文档第 1–4 步）**。先量再解释：《六级核心》在架 269 张里 0 新 0 到期，合集另有 38 张到期不在书内——旧文案那句"已选题型下没有可学的卡，可能是牌组当日新词额度已用完"**两个猜测都不成立**，病根是把算出来的 0 用模糊话包装。`end_of_session_reason()` 现为六条各报自己数字的分支（含新的"所选词组已学完 + 合集里另有 N 张到期"）。队列从 `due→new` 换成 `new→due`，**同时必须把内层 `break` 改 `continue`**，否则到期词永远进不了卡。选取模型换成有序条目列表 `{book, tags}`，`tags: []` 读作"整本"，旧单本键自动折成一条（没碰新控件的人学的东西一字不变），指向不存在词书的条目丢弃不猜（§9.4a 的形状）；标签子集用 **OR**（勾第二个标签绝不让词池变小），跨条目片段**必须加显式括号**（反证过：去掉就红）。`prepare_question` 外层按条目循环 + `_selection_index` 盖章 → **顺序接续是引擎自带的**（反证过：缩成 `range(1)` 红三条）。两个自伤值得记住：`review_logic.py` 里一度有**两个同名 `def resolve_book_decks`**，旧版静默覆盖新版，Python 不报错 → 新增 AST 顶层重名检查；`_book_decks_by_book` 曾把缓存写在**调用方的 cfg** 上，两条 plan 测试其实是靠共享 CFG 污染才"通过"的。**新查出来没修的**：那本词书剩下 104 张新词全在 170 张挂起里，而 170 挂起 = 170 `zvr_mastered`（差集两侧都是 0，就是用户自己按 E 的结果），所以"没有未学的新词"只对"在架"成立——该分支要把挂起数报出来，且绝不替用户取消挂起。301 unittest / 26 node / 24/24 离屏 Qt 全绿；11:46:36 部署 `review_logic.py` `review_popup.py`（`pre-deploy-20261105-114636/`）、11:46:43 加载、`closed in 3.9 s`，重启后 269/269/175/6885 **逐项 unchanged: True**。**可见变化只有两条**（那句话现在说真话、新词先于到期）；第 5 步（设置页多行 + 每本勾标签）做完之前，UI 造不出多条目选取。
 
@@ -135,6 +142,8 @@ python tools/restart-anki.py --wait 300   # 等到空闲（没有卡片在屏 + 
 
 ## 5. 待办（严格按顺序）
 
+**0. 先部署本轮（#65 + #66，代码已绿、未部署）** —— 备份并拷贝 `morphology.py` `review_logic.py` `review_popup.py` + `lexicon/syllables_supplement.txt` 到安装目录 → `python tools/restart-anki.py --wait 300` → verify-state 五层全绿 + **手动核 `syllables_supplement.txt` 哈希**（面板不查词典）+ 重启前后卡片计数 unchanged → 真机验收分词与评分手感。`kyle_enrich.py` 仍 ABSENT，真题合规未定，**不要顺手部署**。后续可继续批 `prepare_question`（仍 ~2.4s/11–12 次）。
+
 **A. 先收尾** —— 已真屏验收通过（2026-11-02 截图 + 日志）。只剩重启后复验眉标「已学/总数」在每组第二张之后也在。
 
 **B. 视觉** —— 四条已做并部署：选项改成字母独占一列 + 释义换行的悬挂缩进（不再 45 字截断）；听写页重播按钮换成同款 32×32 圆形扬声器；选择题单词与音标居中；词表归属改成卡片底部小圆标签、卡片上不印「来源」（来源进鼠标提示）。**待重启真屏验收**，看用户是否认可换行后卡片变高。
@@ -166,6 +175,11 @@ TTS 音量偏小。Anki 没有音量参数（`aqt/tts.py`、`aqt/sound.py` 均�
 - 想把分数写成“后台保存”，就必须先拆掉 `_answer_on_main` 里 `self.dialog is not dialog` 这道闸：卡面已经翻页，这道闸会让每一次后台保存都失败。防重复写靠 generation、账户对象、卡片快照三层，不靠“当前显示的是不是这张卡”。
 - 翻页比保存快，Anki 的当日额度就会慢一拍：不扣掉“正在写的那一张”，下一张会照常发出来，等用户答完才被 `submit_review` 以「今天的复习额度已用完」退回。`prepare_question` 用 `_review_inflight_new/_review_inflight_due` 两个键把这一张预先扣掉。
 - **绝对不要在 Qt 的信号槽里同步调 AnkiConnect 的写操作。** UI 线程会卡在 HTTP 应答上，而 Anki 要等 UI 线程空出来才能处理那个写请求——自己锁死自己（点「已掌握」卡死就是这么来的）。写操作放工作线程，用信号回到主线程收尾。
+- **抓 Merriam-Webster 只有 `mcp__windows_mcp__Scrape` 能过**（WebFetch 和 curl 都 403）。MW 词头每个中点 U+00B7 后带一个零宽空格 U+200B；Cambridge / dictionary.com 词头不带点（只有 IPA 带点），Collins curl 403。抠带点词头时正则要把 `\u200b?` 算进去。
+- **死掉 agent 的工具结果还能抢救**：完整输出在 jsonl user 行的顶层 `toolUseResult` 字段（`message.content` 的 tool_result 可能是截断副本）。JSON 转义的 `\n` 会把字母 n 粘到下一个 token 头上，分词前先 `blob.replace('\\n',' ')`（用 lookbehind 挡字母反而更糟）。脚本 `tmp/salvage_agent_evidence.py`。
+- **AnkiConnect `multi` 按序返回纯结果列表，不是 `[result, error]` 对**；批量只读用它，异常或结果数不够要回落串行。`_multi` 在 `review_logic.py`。
+- **`verify-state` 部署层只哈希顶层 `*.py`，不查 `lexicon/` 数据文件**：新增/改词典补充文件后面板会假绿，部署后必须手动比对哈希。
+- **`windows-judgment-rows.py` 是计时敏感的离屏检查，全量里偶发一次红**（单跑与复跑都绿）。看到 33/34 先单跑这一条复现，别当成回归。
 
 ## 7. 红线（用户原话，逐条遵守）
 
@@ -182,6 +196,6 @@ TTS 音量偏小。Anki 没有音量参数（`aqt/tts.py`、`aqt/sound.py` 均�
 
 ## 8. 第一次回复的要求
 
-不要长。说清三件事：`verify-state` 现在显示什么、三个红检查是为什么红的、你打算先动哪一件。然后开工。
+不要长。说清三件事：`verify-state` 现在显示什么（当前应是 3 个 DRIFT 文件 + 真机跑旧码、闸门已绿）、本轮 #65/#66 卡在哪一层（源码已改/测试通过/未部署）、你打算先动哪一件（按 §5 第 0 步：备份→部署→重启→五层验证+手动核词典哈希→真机验收）。然后开工。
 
-现状只认一个入口：`AUDIT-2026-10-30.md` 的 **§9**（§1–§8 是历史）。动手前读完 §9。
+现状只认一个入口：`AUDIT-2026-10-30.md` 的 **§9**（§1–§8 是历史），最新两条是 **§9.50（分词）/ §9.51（卡顿）**。动手前读完 §9。

@@ -81,11 +81,14 @@ def confusion(word):
 @lru_cache(maxsize=1)
 def _syllables():
     result = {}
-    path = Path(__file__).parent / 'lexicon' / 'syllables.txt'
-    for line in path.read_text(encoding='utf-8').splitlines():
-        parts = line.strip().casefold().split(';')
-        if len(parts) > 1 and all(re.fullmatch(r'[a-z]+', part) for part in parts):
-            result.setdefault(''.join(parts), tuple(parts))
+    # The 25k list is a common-word filter; the supplement covers shipped-book
+    # words it misses (full Moby Hyphenator II + dictionary-checked entries).
+    for name in ('syllables.txt', 'syllables_supplement.txt'):
+        path = Path(__file__).parent / 'lexicon' / name
+        for line in path.read_text(encoding='utf-8').splitlines():
+            parts = line.strip().casefold().split(';')
+            if len(parts) > 1 and all(re.fullmatch(r'[a-z]+', part) for part in parts):
+                result.setdefault(''.join(parts), tuple(parts))
     return result
 
 
@@ -101,4 +104,6 @@ def spelling_chunks(word):
             pieces.append(word[index:index + len(part)])
             index += len(part)
         return '音节分段', pieces
-    return '拼写分块', [word[index:index + 4] for index in range(0, len(word), 4)]
+    # No mechanical fallback: a fake break (disi·llus·ion) teaches a fake
+    # pronunciation. A word no syllable source covers shows no division at all.
+    return None

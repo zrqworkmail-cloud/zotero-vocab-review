@@ -174,6 +174,34 @@ assert flipped,'rating must not wait for a fresh prepare: %s' % prep
 assert prep.count('flip')==1,'the flip must reuse the prefetched card, not prepare again: %s' % prep
 ctl3.stop();app.processEvents()
 
+# 4. Rating while the prefetch is STILL running must wait for it, not start a second
+#    full prepare. The old 0.4 s cap turned a slow prefetch into double work — two
+#    threads racing the same round trips — which is what made every rating lag
+#    (measured 2026-11-10: answer phase <=1 s for 365/381 ratings, prefetch ~3 s).
+prep4=[]
+def slow_prepare(api, config, mode='mixed', rng=None, due_only=False):
+    prep4.append('prefetch' if config.get('_review_prefetch') else 'flip')
+    QTest.qWait(700)
+    return card(60+len(prep4), 'inflight')
+rp.prepare_question=slow_prepare
+ctl4=DesktopReviewController(lambda:cfg, lambda *a:None, lambda *a:None, lambda *a:None)
+ctl4._lookup_known_words=lambda *a:None;ctl4._lookup_relations=lambda *a:None;ctl4.schedule=lambda **kw:None
+ctl4.show_next(True)
+for _ in range(400):
+    app.processEvents(); QTest.qWait(5)
+    if ctl4.dialog is not None: break
+assert ctl4.dialog is not None and prep4[0]=='flip',prep4
+shown4=ctl4.dialog
+# Rate at once: the 700 ms prefetch cannot have finished in the ~5 ms since display.
+shown4.start_grade(3)
+flipped=False
+for _ in range(400):
+    app.processEvents(); QTest.qWait(5)
+    if ctl4.dialog is not shown4: flipped=True; break
+assert flipped,'rating must still flip while the prefetch is in flight'
+assert prep4.count('flip')==1,'the flip must wait for the in-flight prefetch, not prepare a second time: %s' % prep4
+ctl4.stop();app.processEvents()
+
 rp.submit_review, rp.collection_plan, rp.prepare_question, rp.book_progress = real
 
 # Dismissing the card must not leave a sentence talking in the background.

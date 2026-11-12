@@ -1,0 +1,118 @@
+# Supplement to syllables.txt: written syllable breaks for shipped-book words
+# the 25k common-word list misses. Same ';' format; the word is the parts joined.
+# Section 1 - Moby Hyphenator II (Grady Ward, public domain), full 187,175-entry
+# list via https://github.com/elitejake/Moby-Project ("Moby Hyphenator II/mhyph.txt"),
+# retrieved 2026-11-10. Same lineage as syllables.txt. 66 words.
+ac;ces;sa;ry
+ac;cus;tom
+ac;quis;i;tive
+be;wil;der
+cen;ti;grade
+cen;ti;me;tre
+cen;tral;ize
+civ;i;lize
+col;o;nist
+com;pat;ri;ot
+con;dense
+con;temp;tu;ous
+con;trive
+def;er;en;tial
+dis;con;tent;ed
+dis;il;lu;sion
+dis;o;ri;ent
+dis;please
+dis;sat;is;fy
+em;i;grate
+es;thet;ic
+fahr;en;heit
+fas;ci;nate
+fault;less
+foot;step
+i;dle;ness
+im;mi;grate
+im;pov;er;ish
+im;pris;on
+in;au;gu;rate
+in;dis;crim;i;nate;ly
+in;dus;tri;al;ize
+in;tri;ca;cy
+lam;en;ta;tion
+land;la;dy
+lu;bri;cate
+mil;li;me;tre
+north;wards
+ob;sti;nate
+out;skirt
+o;ver;hear
+par;a;lyse
+par;a;lyze
+pe;cu;li;ar;i;ty
+per;se;cute
+plu;to;crat
+pre;des;tine
+prep;o;si;tion
+re;flex;ion
+rel;e;gate
+sat;u;rate
+seg;re;gate
+snob;bish
+so;phis;ti;cate
+south;wards
+stew;ard;ess
+sub;di;vide
+sub;merge
+tab;u;late
+thought;less
+touch;a;ble
+vac;ci;nate
+ven;ti;late
+vi;ta;mine
+white;wash
+work;piece
+# Section 2 - 37 words checked against dictionary headwords, 2026-11-10/11.
+# 32 are Merriam-Webster headword divisions captured verbatim (middle dots).
+# MW blocks plain curl/WebFetch (403); these were fetched via the windows_mcp
+# Scrape tool. 5 are transparent inflections/variants of a verified base:
+#   dishonour    dis;hon;our    <- MW dishonor dis·hon·or + MW honour hon·our (-our variant)
+#   hypotheses   hy;poth;e;ses  <- MW hypothesis hy·poth·e·sis + Cambridge plural /haɪˈpɒθ.ə.siːz/
+#   projecting   pro;ject;ing   <- MW project (verb) pro·ject + -ing
+#   violently    vi;o;lent;ly   <- MW violent vi·o·lent + -ly
+#   shipbuilding ship;build;ing <- Moby shipbuilder ship·build·er + -ing
+# 'strength' is intentionally absent: one syllable, no source divides it.
+con;sul;tan;cy
+cor;re;spond;ing
+dis;hon;our
+dis;il;lu;sion;ed
+en;deav;our
+hon;our;able
+hy;poth;e;ses
+in;as;much
+in;ter;con;nect
+life;style
+mi;cro;com;put;er
+nor;mal;i;za;tion
+nu;tri;tion;al
+par;tial;ly
+pes;si;mis;tic
+pre;dom;i;nant;ly
+pre;vi;ous;ly
+pri;or;i;tize
+pro;ject;ing
+re;al;i;za;tion
+rel;a;tive;ly
+re;li;abil;i;ty
+seem;ing;ly
+sem;i;nate
+ship;build;ing
+sight;see;ing
+sor;row;ful
+spe;cif;i;cal;ly
+still;ness
+stran;gler
+strong;ly
+suf;fi;cient;ly
+sys;tem;at;i;cal;ly
+tech;no;log;i;cal
+vi;o;la;tion
+vi;o;lent;ly
+work;place

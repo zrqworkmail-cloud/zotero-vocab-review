@@ -29,20 +29,26 @@ TAG_CARDS={'zvr_cet6_core':9,'zvr_cet6_full':9,'高频':5,'真题':3}
 def api(action,params):
     CALLS.append(action)
     if DELAY[0]: time.sleep(DELAY[0])
+    return answer(action,params)
+
+def answer(action,params):
+    # `multi` carries heterogeneous batches since 2026-11-10 (deck probes, stats + stage
+    # searches, tag counts), so inner actions dispatch through the same handlers — the way
+    # AnkiConnect runs them server-side, one round trip, no per-action delay.
+    if action=='multi': return [answer(inner['action'],inner['params']) for inner in params['actions']]
     if action=='deckNames': return ['文献单词']
     if action=='getDeckStats': return {'1':{'name':params['decks'][0],'new_count':7,'learn_count':2,'review_count':3}}
     if action=='getTags': return list(TAG_CARDS)
-    if action=='multi':
-        answers=[]
-        for inner in params['actions']:
-            tag=inner['params']['query'].rstrip().split('tag:"')[-1].rstrip('"')
-            answers.append(list(range(TAG_CARDS.get(tag,0))))
-        return answers
     if action=='findCards':
         query=params['query']
         if '-tag:' in query: return [1,2]          # （无标签）count
         if 'is:new' in query: return list(range(7))
         if 'is:due' in query: return list(range(5))
+        if query.rstrip().endswith('"') and 'tag:"' in query:
+            # A tag-count search ends in the tag being counted; a deck probe ends in
+            # stage markers and must fall through to the non-empty answer below.
+            tag=query.rstrip().split('tag:"')[-1].rstrip('"')
+            return list(range(TAG_CARDS.get(tag,0)))
         return [1]
     raise AssertionError(action)
 

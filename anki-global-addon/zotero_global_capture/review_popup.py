@@ -196,9 +196,9 @@ def _plain_label(text, name=None):
 
 
 def syllable_display(word):
-    """Real syllable breaks belong on the word itself; a mechanical letter grouping
-    stays down in the detail list, because dressing the word up with something that
-    is not syllables would be worse than not showing it at all."""
+    """Real syllable breaks belong on the word itself; a word no syllable source
+    covers shows none, because dressing the word up with something that is not
+    syllables would be worse than not showing it at all."""
     try:
         chunks = morphology.spelling_chunks(word)
     except Exception:
@@ -1847,7 +1847,7 @@ class ReviewDialog(QDialog):
             self.answer_word.setText(shown)
             self.answer_word.setToolTip(
                 self.question['word'] if shown == self.question['word']
-                else '%s\n音节分段来源：Moby 音节词表；不代表词根词缀。' % self.question['word'])
+                else '%s\n音节分段来源：Moby 音节词表及词典核对补充；不代表词根词缀。' % self.question['word'])
             if self.book_chips:
                 # Built at birth, so the card already knows how wide it has to be.
                 self.book_chip.show()
@@ -1865,11 +1865,6 @@ class ReviewDialog(QDialog):
             breakdown = morphology.breakdown(self.question['word'])
             if breakdown:
                 self.add_detail('拆分记忆', breakdown)
-            chunks = morphology.spelling_chunks(self.question['word'])
-            # The syllable form is on the word now, so repeating it below is noise;
-            # only the mechanical letter grouping still earns its own card.
-            if chunks and chunks[0] != '音节分段':
-                self.add_detail(chunks[0], ' · '.join(chunks[1]) + '\n按字母机械分组，不代表音节或词根词缀。')
             contrast = morphology.confusion(self.question['word'])
             if contrast:
                 self.add_detail('易混辨析', contrast)
@@ -2409,10 +2404,13 @@ class DesktopReviewController:
         self.prefetch_ready = ready
 
         def work():
-            result = self._next_result(cfg, completed, current_target)
-            if generation == self.generation and self.dialog is dialog and result[0]:
-                self.prefetched = (key, result)
-            ready.set()
+            try:
+                result = self._next_result(cfg, completed, current_target)
+                if generation == self.generation and self.dialog is dialog and result[0]:
+                    self.prefetched = (key, result)
+            finally:
+                # The flip waits on this event; a prefetch that dies must still release it.
+                ready.set()
         threading.Thread(target=work, daemon=True).start()
 
     def show_next(self, manual=True, due_only=False, continuation=False):
@@ -2922,9 +2920,13 @@ class DesktopReviewController:
             key = (generation, frozenset(cfg['_review_exclude_cards']), current_target)
             ready = self.prefetch_ready
             if self.prefetched is None and ready is not None:
-                # A prefetch that is still running is far cheaper than starting a
-                # second round trip, so give it a moment before falling back.
-                ready.wait(0.4)
+                # The prefetch started when this card appeared, so it is already partway
+                # through the same round trips a fresh prepare would make. Waiting for it
+                # is strictly cheaper than racing it with a second full computation — the
+                # old 0.4 s cap did exactly that, and the doubled load is what made every
+                # rating lag (measured 2026-11-10). The cap is only a deadlock valve for a
+                # prefetch that never finishes.
+                ready.wait(15)
             prefetched, self.prefetched = self.prefetched, None
             self.prefetch_ready = None
             result = (prefetched[1] if prefetched is not None and prefetched[0] == key
