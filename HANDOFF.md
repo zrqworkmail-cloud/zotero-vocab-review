@@ -20,6 +20,8 @@ git worktree，分支 `feat/review-acceptance`，已推 origin。**原目录不�
 
 Anki 26.9.3 装在 `D:\Program Files (x86)\Anki`，自带 PyQt6 在 `app_packages`；离屏 Qt 检查靠这个路径。
 
+> **文档分层（2026-11-12）**：通用流程见 `plugin-development` skill（`C:\Users\Admin\.sclaw\agent\skills\plugin-development\SKILL.md`）；本项目路径、命令、基线、例外见仓库根目录 `PROJECT_PLUGIN_PROFILE.md`。HANDOFF 只保留交接状态，不再复制整套流程。
+
 ## 2. 第一条命令
 
 ```
@@ -36,6 +38,18 @@ python tools/restart-anki.py --wait 300   # 等到空闲（没有卡片在屏 + 
 
 它只在空闲时动手，并在重启前后比对卡片计数，数据变了就报错退出。不空闲时它什么都不做，退出码 2。
 
+### 部署顺序（固定，2026-11-12）
+
+1. `python tools/pre-deploy-check.py --apply` —— 生成完整回滚快照（`deployment-backups/pre-deploy-<stamp>/`）并记录当前计数基线；只写备份，不动安装目录。
+2. `python tools/pre-deploy-check.py --check` —— 必须 `EXIT=0`；备份不完整、未加载、计数不可读都算未通过，不进入部署。
+3. 拷贝本次变更文件到 `%APPDATA%\Anki2\addons21\zotero_global_capture`（只拷变更，保留 `config.json` / `meta.json` / 词库）。
+4. `python tools/restart-anki.py --wait 300` —— 看 `closed politely in N s`，不要强杀。
+5. `python tools/verify-state.py` —— 五层；手动核 `lexicon/syllables_supplement.txt` 哈希，并确认重启前后计数 unchanged。
+
+`--check` 的 `counts.baseline` 来自第 1 步；部署后复跑 `--check` 可直接看 `counts.changed` 是否为空。
+
+> **2026-11-17 当前状态**：85158043 已禁用（备份见 §2.1），无复习卡时点 X 已实测直接退出；以下关于托盘的说明保留为禁用前的历史/兼容记录。
+
 **退出方式（2026-11-04 更正，见 AUDIT §9.36）**：这台机器装着 **Minimize to Tray 2**（`addons21/85158043`），它把 `mw.closeEvent` 改成"收进托盘"，所以 **点 X、WM_CLOSE、AnkiConnect 的 `guiExitAnki` 全都不是退出**（实测 `guiExitAnki` 只会隐藏，最后仍要强杀）。真退出只有一个协议：`mw.closeEventFromAction = True` 然后 `mw.close()`。restart 工具因此改成：往 `%TEMP%\zvr-quit-request` 写请求 → 插件 5 秒内认领并按上述协议退出（实测 **3.9 秒干净退出、`profile_will_close` 首次触发、不再强杀**）→ 45 秒没人认领才回落到旧的 WM_CLOSE→强杀。看到 `closed politely in N s` 才说明这条路通了。
 
 两条自己判断的规则（用户 2026-11-02 明确授权，不必再问；17:40 又补一句「我不想手动关，你自动给我重启」）：
@@ -45,14 +59,34 @@ python tools/restart-anki.py --wait 300   # 等到空闲（没有卡片在屏 + 
 
 **规则：源码已改、测试通过、文件已部署、Anki 已加载、真屏已验证——五件事，不许混为一谈。** 报告进度必须分层说，说清卡在哪一层。
 
-## 3. 现在的真实状态（2026-11-10；唯一入口是 AUDIT §9.11 与 §9.13–§9.51）
+## 2.1 本轮提交说明（2026-11-17，已提交；其余工作区文件未提交）
+
+- **新增工具** `tools/count-revlog-time.py`：只读调用 AnkiConnect `findCards` / `getReviewsOfCards`，统计指定时间窗内 `revlog.time` 的 0 / 非 0 条数；不写复习记录，不改设置。
+  - `--limit N`：取最新 N 条，默认 30；`0` 表示全部。
+  - `--since ...`：支持 ISO 日期时间、本地日期、epoch 秒/毫秒；按 review id 过滤。
+  - 输出 `total / zero / nonzero / distinct_cards / time_ms_min/max`；不足 N 条时额外输出 `shortfall`。
+- **自检**：新增 `tests/test_count_revlog_time.py`，8 条离线 unittest，覆盖时间解析、窗口扩展、`getReviewsOfCards` 分批、since 过滤和报表；`python -B -m unittest discover -s tests -p 'test_count_revlog_time.py' -v` 全绿。整仓 unittest 481 条全绿（运行时显式设置 `APPDATA=C:\Users\Admin\AppData\Roaming`）。
+- **实测**：`--limit 30` 为 `zero=0 / nonzero=30`；`--limit 0 --since 2026-11-17T17:16:49+08:00` 为 `total=101 / zero=0 / nonzero=101`（验证时数据；工具本身不写 revlog）。
+- **托盘插件**：`85158043`「Minimize to Tray 2」已禁用，原 `meta.json` 备份在 `anki-authority-audit/deployment-backups/tray-addon-85158043-meta-20261117.json`；无复习卡时点 X 已实测 `ANKI_EXITED`，随后重启成功。建议 git 提交信息：`tools: add revlog time audit and self-check`。
+- **部署状态**：本工具与测试属于源码/自检，不改 addon 安装目录，无需部署或重启。
+
+## 3. 现在的真实状态（2026-11-13；历史基线 2026-11-10，AUDIT §9.11 与 §9.13–§9.51；最新兼容验证见开头）
+
+### 26.9.3 兼容验证（2026-11-13，已完成）
+
+- **结论：Anki 26.9.3 兼容边界成立。** 干净 base 为 `...\workspace\anki-compat-26.9.3\base`，profile `User 1`，`ANKI_SINGLE_INSTANCE_KEY=anki-compat-260903`；用 `Tools → Add-ons → Install from file...` 安装 `anki-global-addon\dist\zotero_global_capture.ankiaddon`，Add-ons 列表出现“单词随身复习与全局划词”。启动提示 `26.09.4` 更新时选择 **No**，未升级。
+- `meta.json` 回读：`human_version=0.4.0-beta.10`、`min_point_version=260903`、`max_point_version=-260903`、`disabled=false`。
+- 加载证据：重启后顶部工具栏出现“开始学习 · 未选词书”（`zvr-desktop-review`），安装前无此入口；启动无“不兼容/加载失败”对话框，说明已实际加载执行。
+- 文件核对：归档 **39 个文件条目**；安装后 **40 个文件 = 39 个包内文件 + Anki 运行时生成的 `meta.json`**。其余 39 项逐项比对 SHA256 与大小全部一致，无缺失、无不匹配；`kyle_enrich.py` 与 `kyle_books.py` 均不存在。
+- 收尾：干净实例用 `File → Exit` 退出；活动实例未参与安装、未写入。**当前 `min=max=260903` 仍只声明 26.9.3，未实测版本不冒充兼容。**
+- 详细证据见 `PROJECT_PLUGIN_PROFILE.md` §6。
 
 - **这一轮（§9.50 / §9.51，#65 + #66）：代码完成、闸门全绿、文件未部署。项目正在交接给另一个 agent，所以本轮刻意没部署到用户的活 Anki——部署留作接手后的第一步。** 两件事：
   - **#65 分词改造**：用户「去掉机械分块，我希望按照音节分」。做法是**书面音节划分**（不是按发音算、不是词根词缀）。删掉 `morphology.spelling_chunks` 的 4 字母机械兜底，查不到音节来源就 `return None`（不显示分段，绝不显示假分段）。数据三层：随包 2.5 万词表 + 补充文件第 1 段（完整版 Moby Hyphenator II 187,175 条公有领域里挑的 66 词）+ 第 2 段（37 个词典核对词 = 32 个 MW 词头点分 + 5 个写在文件头的派生）。复测：20082 键、词书缺词 104→覆盖 103（`strength` 单音节有意不分）。**MW 抓取只有 `mcp__windows_mcp__Scrape` 能过（WebFetch/curl 都 403），词头中点后带零宽空格 U+200B**；死掉 agent 的核对结果从 jsonl 顶层 `toolUseResult` 抢救（脚本 `tmp/salvage_agent_evidence.py`）。详见 §9.50。
   - **#66 评分后卡顿**：根因是 `_next_result` 30+ 次串行往返 + `_flip` 的 `ready.wait(0.4)` 超时后**重算一遍**。修法：`_flip` 最多等 15s（死锁阀）绝不重算、预取 `try/finally` 保证 ready 被 set、`_multi` 把独立只读合并成一次 AnkiConnect `multi`（按序返回纯结果，不是 [result,error] 对）。**同一活合集复测：旧 3983ms/35 往返 → 新 ~2960–3200ms/16–17 往返**；`prepare_question` 仍是大头 ~2.4s/11–12 次、尚未完全批量（后续可继续）。「不卡」靠预取把读时藏到看答案那段时间背后，不是消成 0。详见 §9.51。
   - **闸门**：428 unittest / 26 node / 34/34 离屏 Qt 全绿（`windows-judgment-rows` 在全量里偶发一次 33/34，单跑 3/3 与全量复跑都绿，是计时敏感的旧检查，与本轮无关）。
   - **部署 baseline（verify-state，2026-11-10）**：19/23 文件匹配；DRIFT = `morphology.py` `review_logic.py` `review_popup.py`；`kyle_enrich.py` ABSENT（旧有、从未部署、真题合规未定，别顺手部署）；真机仍跑旧码（插件启动 2026-11-10 09:50:30）。**`verify-state` 部署层只哈希顶层 `*.py`，不查 `lexicon/`——部署后必须手动比对 `syllables_supplement.txt` 哈希，否则假绿。**
-  - **接手后第一步**：备份这三个 .py（`.bak-<stamp>`）→ 拷贝三个 .py + `lexicon/syllables_supplement.txt` → `python tools/restart-anki.py --wait 300`（托盘协议，看 `closed politely in N s`）→ verify-state 五层 + 手动核词典哈希 + 重启前后卡片计数 unchanged → 真机验收「分词是否合理」「评分后是否还卡」。
+  - **接手后第一步**：按 §2「部署顺序」：`--apply` 生成完整快照 → `--check` 必须 0 → 拷贝本轮变更（当前是 `morphology.py` `review_logic.py` `review_popup.py` + `lexicon/syllables_supplement.txt`）→ `restart-anki.py --wait 300` → `verify-state.py` 五层 + 手动核词典哈希 + 重启前后计数 unchanged → 真机验收「分词是否合理」「评分后是否还卡」。
 
 - 这一轮（§9.48）：**「本组结束」不再猜原因，取卡顺序改成今日新词在前，多选词组的引擎落地（设计文档第 1–4 步）**。先量再解释：《六级核心》在架 269 张里 0 新 0 到期，合集另有 38 张到期不在书内——旧文案那句"已选题型下没有可学的卡，可能是牌组当日新词额度已用完"**两个猜测都不成立**，病根是把算出来的 0 用模糊话包装。`end_of_session_reason()` 现为六条各报自己数字的分支（含新的"所选词组已学完 + 合集里另有 N 张到期"）。队列从 `due→new` 换成 `new→due`，**同时必须把内层 `break` 改 `continue`**，否则到期词永远进不了卡。选取模型换成有序条目列表 `{book, tags}`，`tags: []` 读作"整本"，旧单本键自动折成一条（没碰新控件的人学的东西一字不变），指向不存在词书的条目丢弃不猜（§9.4a 的形状）；标签子集用 **OR**（勾第二个标签绝不让词池变小），跨条目片段**必须加显式括号**（反证过：去掉就红）。`prepare_question` 外层按条目循环 + `_selection_index` 盖章 → **顺序接续是引擎自带的**（反证过：缩成 `range(1)` 红三条）。两个自伤值得记住：`review_logic.py` 里一度有**两个同名 `def resolve_book_decks`**，旧版静默覆盖新版，Python 不报错 → 新增 AST 顶层重名检查；`_book_decks_by_book` 曾把缓存写在**调用方的 cfg** 上，两条 plan 测试其实是靠共享 CFG 污染才"通过"的。**新查出来没修的**：那本词书剩下 104 张新词全在 170 张挂起里，而 170 挂起 = 170 `zvr_mastered`（差集两侧都是 0，就是用户自己按 E 的结果），所以"没有未学的新词"只对"在架"成立——该分支要把挂起数报出来，且绝不替用户取消挂起。301 unittest / 26 node / 24/24 离屏 Qt 全绿；11:46:36 部署 `review_logic.py` `review_popup.py`（`pre-deploy-20261105-114636/`）、11:46:43 加载、`closed in 3.9 s`，重启后 269/269/175/6885 **逐项 unchanged: True**。**可见变化只有两条**（那句话现在说真话、新词先于到期）；第 5 步（设置页多行 + 每本勾标签）做完之前，UI 造不出多条目选取。
 
@@ -116,6 +150,7 @@ python tools/restart-anki.py --wait 300   # 等到空闲（没有卡片在屏 + 
 - **组间必须问一句**（2026-11-02，2026-11-04 改版）：一组结束弹 3 秒倒计时，面板上写大字 **`按 Enter 进入下一组学习`**（20px 粗体 `#breakHint`），回车/点击进下一组，不按就结束。不要恢复"自动进入下一组"的静默翻页。面板出现时必须**禁用底下的字母框**——`QLineEdit` 会吃掉 Enter，否则那句提示对刚打完字的人不成立。
 - **同步走后台**（2026-11-02）：本插件把 Anki 的「打开/关闭时同步」关掉，改在空闲时后台同步；恢复时只还原我们亲眼看到的那个值。不要把它改回开/关时同步，也不要在未登录同步账号时弹登录框。
 - **动效只在拼写题、只往前不挡手**（2026-11-04，AUDIT §9.37）：中文徽章（不可思议/完美/很棒/不错），答错与其他题型一律不庆祝；**不要**改回英文大喊，**不要**恢复整卡 ±2px 震动，**不要**为了"放大单词"去改布局内控件的 geometry（会触发重排，把 §9.29–§9.30 的行宽算术全打回去）。庆祝层是 raise 起来的子控件，卡片 `hideEvent` 必须停它。总时长 ≤980ms，翻页不等动画。
+- **2026-11-17 当前状态**：85158043 已禁用；无复习卡时点 X 已实测真正退出。下面这条「关主窗口 ≠ 退出」保留为禁用前的历史规则；`restart-anki.py` 的 quit-request 路径继续兼容旧环境。
 - **关主窗口 ≠ 退出**（2026-11-02 定，2026-11-04 由用户更正）：用户装了 Minimize to Tray 2，**就是要 Anki 在后台常驻**。所以：卡片在屏时我们自己隐藏主窗口并留住卡片；没有卡片时把关闭交还给托盘插件，**两个定时器都不许停**（停了就是"闷着不弹卡"一小时那次事故）。真退出只有托盘那套协议：`mw.closeEventFromAction = True` + `mw.close()`（我们的「退出 Anki」菜单项和 restart 工具都走它；`guiExitAnki` 无效，别再试）。
 - **任何换卡都必须是原地换卡**（评分、已掌握都一样）：新卡嵌在同一个窗口里，不允许"关掉再隔一秒开一扇新窗"。
 - **内嵌的卡片不许改自己的尺寸**（2026-11-03，按 F 出现重影）：用户看到的卡通常 `setParent(host, Widget)` 嵌在上一张的窗口里，尺寸归 host 管；要改窗口大小必须走 `card_window()`（内嵌时是 `self.window()`），否则卡片会比它的窗口小，两个面的像素叠成重影。改高度/宽度的任何新代码都要先问"这张卡是不是内嵌的"。
