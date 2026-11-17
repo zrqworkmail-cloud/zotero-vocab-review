@@ -75,7 +75,50 @@ def deck_stats(name, new=999, learn=0, review=999):
     return {'1': {'name': name, 'new_count': new, 'learn_count': learn, 'review_count': review}}
 
 
+class BatchedAnki(FakeAnki):
+    """A transport that has `multi`, recording only the top-level requests.
+
+    The learner pays for round trips, not for the individual searches inside one `multi`, so
+    this counter is what the regression is about.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.requests = []
+
+    def __call__(self, action, params):
+        self.requests.append((action, params))
+        if action == 'multi':
+            return [FakeAnki.__call__(self, item['action'], item['params'])
+                    for item in params['actions']]
+        return FakeAnki.__call__(self, action, params)
+
+
 class ReviewLogicTests(unittest.TestCase):
+    def test_prepare_question_spends_a_handful_of_requests_not_one_per_step(self):
+        api = BatchedAnki()
+        question = logic.prepare_question(api, dict(CFG, review_modes=['choice']), 'choice', random.Random(3))
+        self.assertIsNotNone(question)
+        # profile + deckNames + findNotes, deck statistics, the queue search, the option
+        # pool, the scheduler question and the distractors used to be separate requests.
+        self.assertLessEqual(len(api.requests), 7, api.requests)
+        first_action, first_params = api.requests[0]
+        self.assertEqual(first_action, 'multi')
+        self.assertEqual([item['action'] for item in first_params['actions']],
+                         ['getActiveProfile', 'deckNames', 'findNotes'])
+        stats_batches = [params['actions'] for action, params in api.requests
+                         if action == 'multi'
+                         and [item['action'] for item in params['actions']] == ['getDeckStats']]
+        self.assertEqual(len(stats_batches), 1, 'one statistics request covers every deck')
+        self.assertEqual([item for item in api.requests if item[0] in ('findCards', 'getDeckStats')], [],
+                         'the queue and option searches belong in a multi')
+
+    def test_a_transport_without_multi_still_answers_the_same_question(self):
+        api = FakeAnki()
+        question = logic.prepare_question(api, CFG, 'typing', random.Random(1))
+        self.assertIsNotNone(question)
+        self.assertIn(question['word'], {'notion', 'method', 'signal', 'context', 'model'})
+
     def test_capture_lookup_cache_expires_and_remains_optional(self):
         calls = []
         def api(action, params):

@@ -15,6 +15,26 @@ from functools import lru_cache
 from html.parser import HTMLParser
 from pathlib import Path
 
+# The pure grading math lives in domain/grading.py.  Unit tests load this file by path,
+# so keep a fallback that does not require the package to be importable as a package.
+try:
+    from .anki_connect import AnkiConnectAdapter
+    from . import collection_queries
+    from .domain.grading import HINT_SHARE_BANDS, ease_from_hint_share, hint_share, letter_weight
+    from .domain.models import SelectionEntry
+    from .review_request import ensure_request, request_for
+except ImportError:  # standalone test loader
+    import sys
+
+    _package_root = str(Path(__file__).resolve().parent)
+    if _package_root not in sys.path:
+        sys.path.insert(0, _package_root)
+    import collection_queries
+    from anki_connect import AnkiConnectAdapter
+    from domain.grading import HINT_SHARE_BANDS, ease_from_hint_share, hint_share, letter_weight
+    from domain.models import SelectionEntry
+    from review_request import ensure_request, request_for
+
 
 QUIT_REQUEST_NAME = 'zvr-quit-request'
 
@@ -249,38 +269,6 @@ def answer_matches(expected, actual):
 MODE_DIFFICULTY = {'typing': 3, 'cloze': 2, 'reverse': 2, 'listening': 1, 'speaking': 1,
                    'choice': 1, 'judgment': 1}
 MODE_WEIGHT = {mode: {1: 0.8, 2: 1.2, 3: 1.5}[difficulty] for mode, difficulty in MODE_DIFFICULTY.items()}
-
-
-def letter_weight(index):
-    """How much the letter at `index` is worth when a hint gives it away.
-
-    The user's rule: 前面的字母比后面的字母权重要高. The first letter of an English word
-    narrows the field of candidates far more than the next-to-last, so the value falls off
-    as 1/(i+1) — cheap to compute, and it makes "one letter out of a 14-letter word" and
-    "one letter out of a 5-letter word" mean different things, which a plain count cannot.
-    """
-    return 1.0 / (index + 1)
-
-
-def hint_share(revealed, letters):
-    """The position-weighted fraction of the word that letter hints already gave away."""
-    if letters <= 0 or not revealed:
-        return 0.0
-    total = sum(letter_weight(index) for index in range(letters))
-    given = sum(letter_weight(index) for index in revealed if 0 <= index < letters)
-    return given / total
-
-
-# Bands chosen so that one early letter of a long word is still a good recall (Good), the
-# first letter of a short word is a real give-away (Hard), and a late letter barely counts.
-HINT_SHARE_BANDS = ((0.20, 4), (0.40, 3), (0.70, 2))
-
-
-def ease_from_hint_share(share):
-    for limit, ease in HINT_SHARE_BANDS:
-        if share <= limit:
-            return ease
-    return 1
 
 
 # 一次发音提示几乎等于没提示：用户点名它应当仍然建议 Easy。
@@ -622,7 +610,7 @@ BOOK_MIGRATION = {'cet6_core': 'cet6_core', 'cet6_full': 'cet6_full', 'cet4_kyle
 
 
 def _escape(value):
-    return str(value).replace('\\', '\\\\').replace('"', '\\"')
+    return collection_queries.escape_query(value)
 
 
 def study_books(cfg=None):
@@ -661,16 +649,7 @@ def study_book(cfg):
 
 
 def book_clause(book):
-    if not book:
-        return ''
-    if book.get('tag'):
-        return ' tag:"%s"' % _escape(book['tag'])
-    if book.get('deck'):
-        return ' deck:"%s"' % _escape(book['deck'])
-    # A catalogue entry always carries one of the two. A dict that carries neither — a half
-    # migrated entry, a hand built test book — means "no scope", and must not raise its way
-    # through whichever caller happens to ask (2026-11-06: the picker did, KeyError 'deck').
-    return ''
+    return collection_queries.book_clause(book)
 
 
 def book_label(cfg):
@@ -690,8 +669,7 @@ def book_tag_counts(api, cfg, book):
     book tag, a word-list tag and sometimes 已掌握. The picker treats the checked tags as a
     union, so the numbers are labels, not a partition, and they must never be summed.
     """
-    clause = book_clause(book)
-    if not clause:
+    if not book_clause(book):
         return []
     try:
         tags = [tag for tag in (api('getTags', {}) or [])]
@@ -699,10 +677,8 @@ def book_tag_counts(api, cfg, book):
         return []
     if not tags:
         return []
-    actions = [{'action': 'findCards',
-                'params': {'query': '%s tag:"%s"' % (clause, _escape(tag))}} for tag in tags]
     try:
-        answers = api('multi', {'actions': actions}) or []
+        answers = _collection(api).tag_card_ids(book, tags) or []
     except Exception:
         return []
     counts = []
@@ -728,10 +704,8 @@ def book_untagged_count(api, book, tags):
     clause = book_clause(book) if book else ''
     if not clause:
         return 0
-    for tag in tags or []:
-        clause += ' -tag:"%s"' % _escape(tag)
     try:
-        return len(api('findCards', {'query': clause}) or [])
+        return len(_collection(api).untagged_card_ids(book, tags) or [])
     except Exception:
         return 0
 
@@ -741,7 +715,7 @@ def book_untagged_count(api, book, tags):
 # exclusion list — a saved list would go stale the moment a card is re-tagged. A real tag
 # with this exact name would collide; the picker lists the pseudo row last so the count
 # still tells them apart.
-UNTAGGED = '（无标签）'
+UNTAGGED = collection_queries.UNTAGGED
 
 
 def selection_entries(cfg):
@@ -768,64 +742,33 @@ def selection_entries(cfg):
                 continue
             seen.add(book_id)
             tags = [str(tag).strip() for tag in (item.get('tags') or []) if str(tag).strip()]
-            entries.append({'book': books[book_id], 'tags': tags})
+            entries.append(SelectionEntry.from_mapping({'book': books[book_id], 'tags': tags}))
     if entries:
-        return entries
+        return [entry.to_mapping() for entry in entries]
     legacy = study_book_id(cfg)
     if legacy:
-        return [{'book': books[legacy], 'tags': []}]
+        return [SelectionEntry.from_mapping({'book': books[legacy], 'tags': []}).to_mapping()]
     return []
 
 
 def entry_clause(entry):
-    """One entry's search fragment: its book, narrowed to the union of the chosen tags.
-
-    Union, not intersection — checking a second tag must never make the pool smaller, which
-    is what an intersection would do and what the learner would read as a bug. The UNTAGGED
-    sentinel joins that union as an operand of explicit negations: "none of the other tags
-    on this book's cards". Without a vocabulary attached it widens to the whole book rather
-    than silently hiding the untagged cards.
-    """
-    base = book_clause(entry.get('book'))
-    tags = entry.get('tags') or []
-    if not tags:
-        return base
-    operands = ['tag:"%s"' % _escape(tag) for tag in tags if tag != UNTAGGED]
-    if UNTAGGED in tags:
-        exclude = entry.get('_untagged_exclude') or []
-        if not exclude:
-            # No other tags on the book (or the vocabulary could not be read): every card
-            # is untagged, and "everything OR anything" is the whole book.
-            return base
-        negations = ' AND '.join('-tag:"%s"' % _escape(tag) for tag in exclude)
-        # The negation group is one operand already; a lone operand needs no second
-        # paren layer, only a union does.
-        operands.append('(%s)' % negations if operands else negations)
-    joined = ' OR '.join(operands)
-    subset = '(%s)' % joined
-    if not base.strip():
-        return ' %s' % subset
-    return ' %s AND %s' % (base.strip(), subset)
+    """One entry's search fragment; implementation lives in ``collection_queries``."""
+    return collection_queries.entry_clause(entry)
 
 
 def selection_clause(entries):
-    """The whole selection as one fragment, for queries that span every chosen 词组.
+    """The whole selection as one fragment; implementation lives in ``collection_queries``."""
+    return collection_queries.selection_clause(entries)
 
-    Each entry that carries its own AND is parenthesised. Without that the result reads
-    `tag:A OR tag:B AND (tag:x)` and is only correct because Anki happens to bind AND
-    tighter than OR — a precedence coincidence, not a design.
-    """
-    parts = []
-    for entry in entries:
-        part = entry_clause(entry).strip()
-        if not part:
-            continue
-        parts.append('(%s)' % part if ' AND ' in part else part)
-    if not parts:
-        return ''
-    if len(parts) == 1:
-        return ' %s' % parts[0]
-    return ' (%s)' % ' OR '.join(parts)
+
+def _selection_entry_models(cfg):
+    """The selection as models; the public ``selection_entries`` keeps its dict shape."""
+    return [SelectionEntry.coerce(entry) for entry in selection_entries(cfg)]
+
+
+def _entry_book_mapping(entry):
+    """The original catalogue dictionary for a model, when it came from config."""
+    return entry.book_mapping if entry.book_mapping is not None else entry.book.to_mapping()
 
 
 def entry_view(cfg, index):
@@ -834,31 +777,34 @@ def entry_view(cfg, index):
     The view is a plain dict copy carrying `_selection_index`; `_search()` is the one place
     that reads it, which is what keeps the change from spreading through the module.
     """
-    entries = selection_entries(cfg)
+    entries = _selection_entry_models(cfg)
     if index is None or not 0 <= index < len(entries):
         return None
     view = dict(cfg)
     view['_selection_index'] = index
-    view['study_book'] = entries[index]['book']['id']
+    view['study_book'] = entries[index].book.id
     return view
 
 
 def current_entries(cfg):
     """The entries this cfg should search over: one when pinned, all otherwise.
 
-    An entry carrying the UNTAGGED sentinel also picks up its exclusion vocabulary here,
-    from the map `_expand_untagged` stamped on the cfg — the one place the pure clause
-    builders and the api-bearing callers meet.
+    Internally this is a list of SelectionEntry objects.  The boundary back to callers is
+    still the old list of dictionaries, including the runtime `_untagged_exclude` key
+    injected from the map `_expand_untagged` stamped on the cfg.
     """
-    entries = selection_entries(cfg)
+    entries = _selection_entry_models(cfg)
     index = (cfg or {}).get('_selection_index')
     if index is not None:
         entries = [entries[index]] if 0 <= index < len(entries) else []
     vocab = (cfg or {}).get('_untagged_vocab') or {}
+    result = []
     for entry in entries:
-        if UNTAGGED in entry['tags'] and entry['book']['id'] in vocab:
-            entry['_untagged_exclude'] = vocab[entry['book']['id']]
-    return entries
+        mapping = entry.to_mapping()
+        if UNTAGGED in entry.tags and entry.book.id in vocab:
+            mapping['_untagged_exclude'] = vocab[entry.book.id]
+        result.append(mapping)
+    return result
 
 
 def _expand_untagged(api, cfg):
@@ -870,25 +816,27 @@ def _expand_untagged(api, cfg):
     so the several clause builders inside one call share a single lookup. The book's own
     tag is never excluded: negating it would empty the row.
     """
-    wanted = [entry for entry in selection_entries(cfg) if UNTAGGED in entry['tags']]
+    entries = _selection_entry_models(cfg)
+    wanted = [entry for entry in entries if UNTAGGED in entry.tags]
     if not wanted:
         return cfg
     vocab = dict((cfg or {}).get('_untagged_vocab') or {})
     for entry in wanted:
-        book = entry['book']
+        book = _entry_book_mapping(entry)
         if book['id'] not in vocab:
             vocab[book['id']] = [tag for tag, _count in book_tag_counts(api, cfg, book)
                                  if tag != book.get('tag')]
     return dict(cfg, _untagged_vocab=vocab)
 
 
-def selection_labels(cfg):
-    return [entry['book']['name'] for entry in selection_entries(cfg)]
+def selection_labels(entries):
+    """Book names for a list of :class:`SelectionEntry` objects, in selection order."""
+    return [SelectionEntry.coerce(entry).book.name for entry in entries]
 
 
 def selection_summary(cfg):
     """'六级核心、六级全表' for the end-of-session sentence, or the single book name."""
-    labels = selection_labels(cfg)
+    labels = selection_labels(selection_entries(cfg))
     return '、'.join(labels) if labels else '这本词书'
 
 
@@ -909,29 +857,30 @@ def question_book_label(cfg, question):
 
 def _clause_for(cfg):
     """The book/tag fragment for this cfg — the whole selection, or one entry when pinned."""
-    entries = current_entries(cfg)
+    entries = [SelectionEntry.coerce(entry) for entry in current_entries(cfg)]
     if len(entries) == 1:
         return entry_clause(entries[0])
     return selection_clause(entries)
 
 
-def _book_decks_for(api, cfg, book):
+def _book_decks_for(api, cfg, book, available=None):
     """The decks one book spans. Not cached on its own: `resolve_book_decks` caches the
     union for the whole selection, and a per-book dict on cfg leaked from one call to the
-    next (it survived a changed deck list and, in the tests, a changed cfg)."""
+    next (it survived a changed deck list and, in the tests, a changed cfg).
+
+    `available` is the deck list a caller has already read. Without it this costs a second
+    `deckNames` right after `_question_from` asked for the same list, which is exactly the
+    kind of duplicate the batched read removed."""
+    available = sorted(available if available is not None else (_collection(api).deck_names() or []))
     if book.get('deck'):
-        decks = [book['deck']] if book['deck'] in set(api('deckNames', {}) or []) else []
+        decks = [book['deck']] if book['deck'] in set(available) else []
     else:
-        available = sorted(api('deckNames', {}) or [])
-        clause = book_clause(book)
-        queries = ['deck:"%s" note:"%s"%s -is:suspended -is:buried'
-                   % (_escape(deck), _escape(cfg['model']), clause) for deck in available]
-        answers = _multi(api, [('findCards', {'query': query}) for query in queries])
+        answers = _collection(api).deck_card_ids(cfg['model'], book, available)
         decks = [deck for deck, ids in zip(available, answers) if ids]
     return decks
 
 
-def resolve_book_decks(api, cfg):
+def resolve_book_decks(api, cfg, available=None):
     """Which decks the selection actually spans.
 
     Anki counts the daily new-card limit per deck, so questions are still drawn deck by deck;
@@ -943,15 +892,16 @@ def resolve_book_decks(api, cfg):
     key = _selection_cache_key(entries)
     if not entries:
         return []
-    if cfg.get('_book_decks_key') == key and isinstance(cfg.get('_book_decks'), list):
-        return cfg['_book_decks']
+    request = ensure_request(cfg)
+    if request.book_decks_key == key and isinstance(request.book_decks, list):
+        return request.book_decks
     decks = []
     for entry in entries:
-        for deck in _book_decks_for(api, cfg, entry['book']):
+        for deck in _book_decks_for(api, cfg, entry['book'], available):
             if deck not in decks:
                 decks.append(deck)
-    cfg['_book_decks'] = decks
-    cfg['_book_decks_key'] = key
+    request.book_decks = decks
+    request.book_decks_key = key
     return decks
 
 
@@ -959,10 +909,21 @@ def _selection_cache_key(entries):
     """One entry with no tag subset keys as its plain book id, so a preseeded
     `_book_decks_key='cet'` still means what it meant before this feature."""
     parts = []
-    for entry in entries:
-        tags = entry.get('tags') or []
-        parts.append(entry['book']['id'] + (':' + '|'.join(tags) if tags else ''))
+    for raw_entry in entries:
+        entry = SelectionEntry.coerce(raw_entry)
+        tags = entry.tags
+        parts.append(entry.book.id + (':' + '|'.join(tags) if tags else ''))
     return ','.join(parts)
+
+
+def _collection(api):
+    """Use the query-owning adapter, wrapping a legacy callable at the boundary."""
+    required = ('suspended_card_ids', 'due_card_ids', 'progress_counts',
+                'tag_card_ids', 'untagged_card_ids', 'deck_names', 'deck_card_ids',
+                'search_query', 'availability_reads')
+    if all(callable(getattr(api, name, None)) for name in required):
+        return api
+    return AnkiConnectAdapter(api)
 
 
 def book_suspended(api, cfg):
@@ -974,7 +935,7 @@ def book_suspended(api, cfg):
     """
     cfg = _expand_untagged(api, cfg)
     try:
-        return len(api('findCards', {'query': 'is:suspended' + _clause_for(cfg)}) or [])
+        return len(_collection(api).suspended_card_ids(current_entries(cfg)) or [])
     except Exception:
         return 0
 
@@ -986,15 +947,16 @@ def due_outside_book(api, cfg):
     learner whether "nothing left" means the collection or just their chosen 词组.
     """
     cfg = _expand_untagged(api, cfg)
+    entries = current_entries(cfg)
+    collection = _collection(api)
     try:
-        everywhere = set(api('findCards', {'query': 'is:due'}) or [])
+        everywhere = set(collection.due_card_ids() or [])
     except Exception:
         return 0
-    clause = _clause_for(cfg)
-    if not clause:
+    if not collection_queries.clause_for(entries):
         return len(everywhere)
     try:
-        inside = set(api('findCards', {'query': 'is:due' + clause}) or [])
+        inside = set(collection.due_card_ids(entries) or [])
     except Exception:
         return len(everywhere)
     return max(0, len(everywhere) - len(inside))
@@ -1007,15 +969,10 @@ def book_progress(api, cfg):
     and deliberately not 'mature'.
     """
     cfg = _expand_untagged(api, cfg)
-    clause = _clause_for(cfg)
-    if not clause and not current_entries(cfg):
+    entries = current_entries(cfg)
+    if not collection_queries.clause_for(entries) and not entries:
         return (0, 0)
-    base = 'note:"%s"%s -is:suspended -is:buried' % (_escape(cfg['model']), clause)
-    # Anki's prop search takes no colon: prop:reps>0. prop:reps:>0 is a parse error,
-    # which is how this count silently failed before it was measured against Anki.
-    total_ids, learned_ids = _multi(api, [('findCards', {'query': base}),
-                                          ('findCards', {'query': base + ' prop:reps>0'})])
-    return (len(learned_ids or []), len(total_ids or []))
+    return _collection(api).progress_counts(cfg['model'], entries)
 
 
 def book_availability(api, cfg):
@@ -1028,13 +985,12 @@ def book_availability(api, cfg):
     """
     cfg = _expand_untagged(api, cfg)
     decks = resolve_book_decks(api, cfg)
-    actions = []
-    for deck in decks:
-        base = _search(dict(cfg, deck=deck))
-        actions.extend([('getDeckStats', {'decks': [deck]}),
-                        ('findCards', {'query': base + ' is:new'}),
-                        ('findCards', {'query': base + ' is:due'})])
-    answers = _multi(api, actions)
+    collection = _collection(api)
+    entries = current_entries(cfg)
+    fallback_book = study_book(cfg)
+    searches = [(deck, collection.search_query(cfg['model'], deck, entries, fallback_book))
+                for deck in decks]
+    answers = collection.availability_reads(searches)
     new_now = due_now = 0
     for index, deck in enumerate(decks):
         values, new_ids, due_ids = answers[index * 3:index * 3 + 3]
@@ -1048,25 +1004,11 @@ def book_availability(api, cfg):
 def _search(cfg, all_decks=False):
     """The query that means "cards from this selection", inside one deck.
 
-    The book/tag fragment is dropped only when it is provably redundant — a single entry
-    that is a whole deck, and that deck is the one being searched. Keeping the fragment in
-    every other case is what makes a multi-词组 selection read correctly instead of quietly
-    matching the whole deck.
+    Query assembly lives in the adapter; this function remains the semantic entry point
+    used by the existing callers and tests.
     """
-    deck = '' if all_decks else 'deck:"%s" ' % _escape(cfg['deck'])
-    entries = current_entries(cfg)
-    if (len(entries) == 1 and not entries[0]['tags'] and entries[0]['book'].get('deck')
-            and cfg['deck'] == entries[0]['book']['deck']):
-        clause = ''
-    elif entries:
-        clause = _clause_for(cfg)
-    else:
-        # No selection at all: fall back to the single-book reading so an unconfigured
-        # account behaves exactly as it did before this feature.
-        book = study_book(cfg)
-        redundant = book and book.get('deck') and cfg['deck'] == book['deck']
-        clause = '' if redundant else book_clause(book)
-    return '%snote:"%s"%s -is:suspended -is:buried' % (deck, _escape(cfg['model']), clause)
+    return AnkiConnectAdapter.search_query(cfg['model'], cfg['deck'], current_entries(cfg),
+                                           study_book(cfg), all_decks)
 
 
 def _multi(api, actions):
@@ -1082,7 +1024,11 @@ def _multi(api, actions):
     if not actions:
         return []
     try:
-        answers = api('multi', {'actions': [{'action': action, 'params': params} for action, params in actions]})
+        batch = getattr(api, 'multi', None)
+        answers = (batch([{'action': action, 'params': params} for action, params in actions])
+                   if callable(batch) else
+                   api('multi', {'actions': [{'action': action, 'params': params}
+                                             for action, params in actions]}))
         if isinstance(answers, list) and len(answers) == len(actions):
             return answers
     except Exception:
@@ -1090,8 +1036,17 @@ def _multi(api, actions):
     return [api(action, params) for action, params in actions]
 
 
+def _answer_card(api, card_id, ease):
+    """Use the adapter's scheduler port when present; keep the callable test seam."""
+    answer = getattr(api, 'answer_card', None)
+    if callable(answer):
+        return answer(card_id, ease)
+    return api('answerCards', {'answers': [{'cardId': card_id, 'ease': ease}]})
+
+
 def _stats_entry(values, deck):
-    result = next((entry for entry in (values or {}).values() if entry.get('name') == deck), None)
+    result = next((entry for entry in (values or {}).values()
+                   if entry and entry.get('name') == deck), None)
     if result is None:
         raise ValueError('没有找到复习牌组，请检查设置。')
     return result
@@ -1106,10 +1061,11 @@ def _field(card, name):
 
 
 def _eligible(card, cfg):
+    request = request_for(cfg)
     deck = card.get('deckName', '')
     return (card.get('modelName') == cfg['model'] and
-            card.get('cardId') != cfg.get('_review_exclude_card') and
-            card.get('cardId') not in cfg.get('_review_exclude_cards', ()) and
+            card.get('cardId') != request.exclude_card and
+            card.get('cardId') not in request.exclude_cards and
             (deck == cfg['deck'] or deck.startswith(cfg['deck'] + '::')) and
             bool(clean_text(_field(card, cfg['front_field']))) and
             bool(clean_text(_field(card, cfg['back_field']))))
@@ -1175,14 +1131,18 @@ def _weight(card, cfg, captures=None):
     return base
 
 
-def _captured_words(api, cfg):
-    cache = cfg.get('_capture_lookup_cache')
-    now = time.monotonic()
-    if cache is not None and now - cache.get('captured_at', 0) < 15 and 'captures' in cache:
-        return cache['captures']
-    ids = api('findNotes', {'query': 'tag:anki_global_capture or tag:zotero_vocab_review'}) or []
+CAPTURE_QUERY = collection_queries.CAPTURE_QUERY
+
+
+def _capture_cache_fresh(cfg, now=None):
+    cache = ensure_request(cfg).capture_lookup_cache
+    now = time.monotonic() if now is None else now
+    return bool(cache is not None and now - cache.get('captured_at', 0) < 15 and 'captures' in cache)
+
+
+def _captures_from_notes(notes, cfg):
     captures = {}
-    for note in api('notesInfo', {'notes': ids}) if ids else []:
+    for note in notes or []:
         fields = note.get('fields') or {}
         word = clean_text(fields.get(cfg['front_field'], {}).get('value', '')).casefold()
         if not word:
@@ -1190,9 +1150,24 @@ def _captured_words(api, cfg):
         text = fields.get(cfg['back_field'], {}).get('value', '')
         counts = re.findall(r'(?:Zotero 收录次数|全局划词收录次数|Global capture count)\s*[:：]\s*(\d+)', text, re.I)
         captures[word] = max(captures.get(word, 0), sum(map(int, counts)), 1)
+    return captures
+
+
+def _remember_captures(cfg, captures, now):
+    cache = ensure_request(cfg).capture_lookup_cache
     if cache is not None:
         cache.clear()
         cache.update(captured_at=now, captures=captures, matching={})
+
+
+def _captured_words(api, cfg):
+    request = ensure_request(cfg)
+    if _capture_cache_fresh(cfg):
+        return request.capture_lookup_cache['captures']
+    now = time.monotonic()
+    ids = api('findNotes', {'query': CAPTURE_QUERY}) or []
+    captures = _captures_from_notes(api('notesInfo', {'notes': ids}) if ids else [], cfg)
+    _remember_captures(cfg, captures, now)
     return captures
 
 
@@ -1355,12 +1330,11 @@ def deck_limits(api, cfg, decks=None):
             config = {}
         new = config.get('new') or {}
         rev = config.get('rev') or {}
-        clause = 'deck:"%s"' % str(deck).replace('\\', '\\\\').replace('"', '\\"')
+        clause = collection_queries.deck_only_clause(deck)
         try:
             answers = api('multi', {'actions': [
-                {'action': 'findCards', 'params': {'query': '%s introduced:1' % clause}},
-                {'action': 'findCards', 'params': {'query': '%s is:new' % clause}},
-                {'action': 'findCards', 'params': {'query': '%s is:due' % clause}}]}) or []
+                {'action': 'findCards', 'params': {'query': query}}
+                for query in collection_queries.deck_limit_queries(deck)]}) or []
         except Exception:
             answers = []
         counts = [len(item or []) if isinstance(item, list) else 0 for item in answers]
@@ -1494,7 +1468,7 @@ def end_of_session_reason(plan, limits_new, book_label='', elsewhere_due=0, mode
 def review_decks(cfg):
     """The decks the chosen book spans. Empty until a book is picked or resolved —
     there is no longer a free-standing deck list in the settings."""
-    decks = cfg.get('_book_decks')
+    decks = request_for(cfg).book_decks
     if isinstance(decks, list):
         return decks
     book = study_book(cfg)
@@ -1509,8 +1483,8 @@ def collection_plan(api, cfg, now=None):
     stages = []
     for deck in decks:
         base = _search(dict(cfg, deck=deck))
-        for key, suffix in (('new', 'is:new'), ('due', 'is:due -is:new'), ('done', 'rated:1'), ('introduced', 'introduced:1')):
-            stages.append((key, base + ' ' + suffix))
+        for key in ('new', 'due', 'done', 'introduced'):
+            stages.append((key, collection_queries.plan_query(base, key)))
     answers = _multi(api, [('findCards', {'query': query}) for _key, query in stages])
     for (key, _query), ids in zip(stages, answers):
         found[key].update(ids or [])
@@ -1712,27 +1686,136 @@ def card_is_learning(api, card_id):
     answers False: the label is decoration, and losing the card over it would be worse.
     """
     try:
-        return bool(api('findCards', {'query': 'cid:%s is:learn -is:review' % card_id}))
+        return bool(api('findCards', {'query': collection_queries.card_state_query(card_id)}))
     except Exception:
         return False
 
 
+def _candidate_decks(entries, available):
+    """The decks one batched read has to ask about.
+
+    A book with a fixed deck is a containment check. A tag book can live in any deck, so its
+    discovery queries must name every deck; asking getDeckStats for the same list costs one
+    extra action and saves a whole round trip.
+    """
+    if not entries:
+        return []
+    fixed = [entry['book'].get('deck') for entry in entries]
+    if all(fixed):
+        return [deck for deck in dict.fromkeys(fixed) if deck in available]
+    return sorted(available)
+
+
+def _deck_discovery(entries, candidates, cfg):
+    """(actions, plan) for finding which decks hold each tag book, in one `multi`.
+
+    This is the same query `_book_decks_for` sends; it is built here so discovery, deck
+    statistics and the capture-note lookup can share one request instead of three.
+    """
+    reads, plan = [], []
+    for entry in entries:
+        book = entry['book']
+        if book.get('deck'):
+            continue
+        for deck in candidates:
+            query = collection_queries.deck_query(cfg['model'], book, deck)
+            reads.append(('findCards', {'query': query}))
+            plan.append(('deck', (book['id'], deck)))
+    return reads, plan
+
+
 def _question_from(api, cfg, mode, rng, due_only):
-    profile = api('getActiveProfile', {})
-    available = set(api('deckNames', {}) or [])
-    decks = [deck for deck in resolve_book_decks(api, cfg) if deck in available]
+    # Three independent reads, one request: the profile, the deck list, and the capture
+    # notes. They used to be three HTTP round trips, and the learner feels each one as a
+    # pause after pressing a rating button.
+    fresh_captures = _capture_cache_fresh(cfg)
+    first = [('getActiveProfile', {}), ('deckNames', {})]
+    if not fresh_captures:
+        first.append(('findNotes', {'query': CAPTURE_QUERY}))
+    answers = _multi(api, first)
+    profile = answers[0]
+    available = set(answers[1] or [])
+    capture_ids = answers[2] if not fresh_captures else []
+    capture_now = time.monotonic()
+
+    entries = current_entries(cfg)
+    if not entries:
+        raise ValueError('这个词书下没有可弹出的卡片，换一个词书试试。')
+    request = ensure_request(cfg)
+    key = _selection_cache_key(entries)
+    cached = request.book_decks if request.book_decks_key == key else None
+    cached = cached if isinstance(cached, list) else None
+    deck_candidates = ([deck for deck in cached if deck in available] if cached is not None
+                       else _candidate_decks(entries, available))
+    if not deck_candidates:
+        raise ValueError('这个词书下没有可弹出的卡片，换一个词书试试。')
+
+    # The capture-note fields and deck discovery depend on the first request, not on each
+    # other, so they share the second one. Statistics wait for the resolved deck list: asking
+    # about a deck that holds none of this book's cards answers "Deck counts unavailable"
+    # and takes the whole batch down with it.
+    reads, plan = [], []
+    if capture_ids:
+        reads.append(('notesInfo', {'notes': capture_ids}))
+        plan.append(('notes', None))
+    if cached is None:
+        deck_reads, deck_plan = _deck_discovery(entries, deck_candidates, cfg)
+        reads.extend(deck_reads)
+        plan.extend(deck_plan)
+    answers = _multi(api, reads) if reads else []
+    notes, observed = [], {}
+    for (kind, payload), answer in zip(plan, answers):
+        if kind == 'notes':
+            notes = answer or []
+        elif kind == 'deck':
+            observed[payload] = bool(answer)
+    if not fresh_captures:
+        captures = _captures_from_notes(notes, cfg)
+        _remember_captures(cfg, captures, capture_now)
+    else:
+        captures = request.capture_lookup_cache['captures'] if request.capture_lookup_cache else {}
+    if cached is None:
+        decks = []
+        for entry in entries:
+            book = entry['book']
+            if book.get('deck'):
+                found = [book['deck']] if book['deck'] in available else []
+            else:
+                found = [deck for deck in deck_candidates if observed.get((book['id'], deck))]
+            for deck in found:
+                if deck not in decks:
+                    decks.append(deck)
+        request.book_decks = decks
+        request.book_decks_key = key
+    else:
+        decks = deck_candidates
     if not decks:
         raise ValueError('这个词书下没有可弹出的卡片，换一个词书试试。')
     deck_cfgs = [dict(cfg, deck=deck) for deck in decks]
-    stats_by_deck = [_stats_entry(values, deck) for values, deck in zip(
-        _multi(api, [('getDeckStats', {'decks': [deck]}) for deck in decks]), decks)]
-    captures = _captured_words(api, cfg)
+    # One getDeckStats for all resolved decks. A stub (or an older transport) may name only
+    # the first one; ask again for the missing decks rather than failing the card.
+    # One action in a `multi` still goes through `_multi`, so every read in this function
+    # degrades the same way on a transport without batching.
+    stats_values = _multi(api, [('getDeckStats', {'decks': decks})])[0] if decks else {}
+    stats_by_name = {}
+    for deck in decks:
+        try:
+            stats_by_name[deck] = _stats_entry(stats_values, deck)
+        except ValueError:
+            pass
+    missing = [deck for deck in decks if deck not in stats_by_name]
+    if missing:
+        for deck, values in zip(missing, _multi(api, [
+                ('getDeckStats', {'decks': [deck]}) for deck in missing])):
+            stats_by_name[deck] = _stats_entry(values, deck)
+    stats_by_deck = [stats_by_name[deck] for deck in decks]
     card = None
     kind = None
     selected_cfg = None
     recent_fallback = None
-    excluded_words = set(cfg.get('_review_exclude_words', ()))
-    recent_words = set(cfg.get('_review_recent_words', ()))
+    request = ensure_request(cfg)
+    excluded_words = set(request.exclude_words)
+    recent_words = set(request.recent_words)
     # New words first, due reviews after: the learner's rule on 2026-11-05 — 「如果有到期的
     # 单词应该在我学习完当天的六级词汇之后，安排进行学习进度里」. The daily total in the plan
     # is unchanged; only which queue is emptied first.
@@ -1741,41 +1824,47 @@ def _question_from(api, cfg, mode, rng, due_only):
     # that same break would silently stop every due card.
     # Which queue this slot belongs to. The loop below still tries the other queue as a
     # fallback, so a due slot whose card turned out unusable does not waste the group slot.
-    suffixes = {'new': 'is:new', 'due': 'is:due -is:new'}
-    position, size = (cfg.get('_review_group') or (0, 0))[:2]
+    position, size = request.group_position, request.group_size
     due_available = sum(max(0, int(stats.get('learn_count', 0)) + int(stats.get('review_count', 0))
-                            - int(deck_cfg.get('_review_inflight_due', 0)))
-                        for stats, deck_cfg in zip(stats_by_deck, deck_cfgs))
-    new_available = sum(max(0, int(stats.get('new_count', 0))
-                            - int(deck_cfg.get('_review_inflight_new', 0)))
-                        for stats, deck_cfg in zip(stats_by_deck, deck_cfgs))
+                            - request.inflight_due)
+                        for stats in stats_by_deck)
+    new_available = sum(max(0, int(stats.get('new_count', 0)) - request.inflight_new)
+                        for stats in stats_by_deck)
     first = queue_order(position, size, due_available, new_available, due_only)
     for label in (first, 'new' if first == 'due' else 'due'):
         if label == 'new' and due_only:
             continue
-        suffix = suffixes[label]
         candidates = []
+        moves = []
         for deck_cfg, stats in zip(deck_cfgs, stats_by_deck):
             allowed = (int(stats.get('learn_count', 0)) + int(stats.get('review_count', 0)) if label == 'due'
                        else int(stats.get('new_count', 0)))
             # A rating that is still being written has already consumed its slot in
             # Anki's daily count; the next card must be chosen as if it had landed.
-            allowed -= int(deck_cfg.get('_review_inflight_due' if label == 'due' else '_review_inflight_new', 0))
+            allowed -= request.inflight_due if label == 'due' else request.inflight_new
             if allowed <= 0:
                 continue
-            query = _search(deck_cfg) + ' ' + suffix
-            ids, tagged_ids = _multi(api, [
+            moves.append((deck_cfg, collection_queries.plan_query(_search(deck_cfg), label)))
+        # One request for every deck that still has a slot. The loop below keeps its deck
+        # order, so the random choices (and therefore the cards users see) stay the same;
+        # only the searches that have no randomness moved into a single round trip.
+        reads = []
+        for _deck_cfg, query in moves:
+            reads.extend([
                 ('findCards', {'query': query}),
-                ('findCards', {'query': query + ' (tag:anki_global_capture or tag:zotero_vocab_review)'})])
-            ids = ids or []
-            tagged = set(tagged_ids or [])
+                ('findCards', {'query': collection_queries.capture_tag_query(query)})])
+        answers = _multi(api, reads) if reads else []
+        sampled = []
+        for index, (deck_cfg, query) in enumerate(moves):
+            ids = answers[index * 2] or []
+            tagged = set(answers[index * 2 + 1] or [])
             if captures and deck_cfg['deck'] != cfg['deck']:
-                cache = cfg.get('_capture_lookup_cache')
+                cache = request.capture_lookup_cache
                 matches = cache.get('matching', {}).get(query) if cache is not None else None
                 if matches is None:
                     words = rng.sample(list(captures), min(100, len(captures)))
                     field = cfg['front_field'].replace('\\', '\\\\').replace('"', '\\"')
-                    actions = [{'action': 'findCards', 'params': {'query': query + ' "' + field + ':' + word.replace('\\', '\\\\').replace('"', '\\"') + '"'}} for word in words]
+                    actions = [{'action': 'findCards', 'params': {'query': collection_queries.field_value_query(query, cfg['front_field'], word)}} for word in words]
                     matches = {cid for matching in api('multi', {'actions': actions}) or [] for cid in (matching or [])}
                     if cache is not None:
                         cache.setdefault('matching', {})[query] = matches
@@ -1784,7 +1873,16 @@ def _question_from(api, cfg, mode, rng, due_only):
             preferred_set = set(preferred)
             others = [cid for cid in ids if cid not in preferred_set]
             sample = rng.sample(preferred, min(80, len(preferred))) + rng.sample(others, min(80, len(others)))
-            candidates.extend((item, deck_cfg) for item in _cards(api, sample, deck_cfg, limit=160))
+            sampled.append((deck_cfg, sample))
+        if sampled:
+            # cardsInfo is deck-agnostic: one call covers every deck's sample, and the
+            # eligibility test below still judges each card by its own deck config.
+            wanted = list(dict.fromkeys(cid for _deck_cfg, sample in sampled for cid in sample))
+            infos = api('cardsInfo', {'cards': wanted}) if wanted else []
+            by_id = {item.get('cardId'): item for item in infos or []}
+            for deck_cfg, sample in sampled:
+                candidates.extend((by_id[cid], deck_cfg) for cid in sample[:160]
+                                  if cid in by_id and _eligible(by_id[cid], deck_cfg))
         candidates = [(item, deck_cfg) for item, deck_cfg in candidates if
                       unambiguous_lemma(clean_text(_field(item, deck_cfg['front_field']))).casefold() not in excluded_words]
         if candidates and selected_review_modes(cfg, mode) == ['cloze']:
@@ -1831,18 +1929,59 @@ def _question_from(api, cfg, mode, rng, due_only):
     options = []
     judgment_statement = ''
     judgment_correct = None
+    # The scheduler question, the option pool and the reverse prefix search do not depend on
+    # which option mode the dice pick, so they share one request. `learning` used to cost its
+    # own round trip on every due card, which is most of a review session.
+    needs_options = any(candidate in ('choice', 'reverse', 'judgment') for candidate in modes)
+    reverse_query = None
+    if needs_options and 'reverse' in modes and re.fullmatch(r'[A-Za-z]{4,30}', word):
+        reverse_query = collection_queries.prefix_query(base, cfg['front_field'], word[:3])
+    reads = []
+    if needs_options:
+        reads.append(('findCards', {'query': base}))
+    if kind != 'new':
+        reads.append(('findCards', {'query': collection_queries.card_state_query(card['cardId'])}))
+    if reverse_query:
+        reads.append(('findCards', {'query': reverse_query}))
+    base_ids = prefix_ids = None
+    learning = False
+    answers = None
+    if reads:
+        try:
+            answers = _multi(api, reads)
+        except Exception:
+            answers = None
+    if answers is not None and len(answers) == len(reads):
+        cursor = 0
+        if needs_options:
+            base_ids = answers[cursor] or []
+            cursor += 1
+        if kind != 'new':
+            learning = bool(answers[cursor])
+            cursor += 1
+        if reverse_query:
+            prefix_ids = answers[cursor] or []
+    else:
+        # A transport without `multi` (or one that answers short) still gets its answers;
+        # this is the old path, and it is why the batch can never lose a card.
+        if needs_options:
+            base_ids = api('findCards', {'query': base}) or []
+        if kind != 'new':
+            learning = card_is_learning(api, card['cardId'])
+        if reverse_query:
+            prefix_ids = api('findCards', {'query': reverse_query}) or []
     while modes:
         mode = rng.choice(modes)
         modes.remove(mode)
         if mode not in ('choice', 'reverse', 'judgment'):
             break
-        ids = api('findCards', {'query': base}) or []
+        ids = base_ids if base_ids is not None else (api('findCards', {'query': base}) or [])
         others = [cid for cid in ids if cid != card['cardId']]
         sampled = rng.sample(others, min(160, len(others)))
         if mode == 'reverse' and re.fullmatch(r'[A-Za-z]{4,30}', word):
-            field = cfg['front_field'].replace('\\', '\\\\').replace('"', '\\"')
-            prefix_query = base + ' "' + field + ':' + word[:3] + '*"'
-            similar_ids = [cid for cid in (api('findCards', {'query': prefix_query}) or []) if cid != card['cardId']]
+            prefix_query = collection_queries.prefix_query(base, cfg['front_field'], word[:3])
+            similar = prefix_ids if prefix_ids is not None else (api('findCards', {'query': prefix_query}) or [])
+            similar_ids = [cid for cid in similar if cid != card['cardId']]
             sampled = rng.sample(similar_ids, min(60, len(similar_ids))) + sampled
         sampled = list(dict.fromkeys(sampled))
         candidates = _cards(api, sampled, cfg, limit=220)
@@ -1874,7 +2013,7 @@ def _question_from(api, cfg, mode, rng, due_only):
         'profile': profile, 'card_id': card['cardId'], 'review_deck': cfg['deck'], 'kind': kind, 'mode': mode, 'word': word,
         # The eyebrow needs to know whether this due card ever graduated, and the scheduler,
         # not our own counters, is the only thing that can say so.
-        'learning': kind != 'new' and card_is_learning(api, card['cardId']),
+        'learning': learning,
         'meaning': meaning, 'options': options, 'source_form': source_form,
         'judgment_statement': judgment_statement, 'judgment_correct': judgment_correct,
         'answer_form': word,
@@ -1930,7 +2069,7 @@ def mark_mastered(api, cfg, question):
     card_id = question['card_id']
     notes = [item.get('note') for item in (api('cardsInfo', {'cards': [card_id]}) or []) if item.get('note')]
     if mastered_action(cfg) == MASTERED_RATE:
-        result = api('answerCards', {'answers': [{'cardId': card_id, 'ease': RATE_EASE_FOR_MASTERED}]})
+        result = _answer_card(api, card_id, RATE_EASE_FOR_MASTERED)
         if result != [True]:
             raise ValueError('Anki 没有确认这次 Easy 评分，单词没有被标记为已掌握。')
     else:
@@ -1940,7 +2079,14 @@ def mark_mastered(api, cfg, question):
     return notes[0] if notes else None
 
 
-def submit_review(api, cfg, question, ease, answer=None):
+def submit_review(api, cfg, question, ease):
+    """Write exactly one rating through AnkiConnect's public answerCards action.
+
+    The UI used to pass a callback that called the private scheduler directly.  That
+    made the public path and the in-process path disagree about queue/quota semantics
+    and tied the add-on to Anki's internal scheduler API.  There is now one path: the
+    same action AnkiConnect exposes, after the profile, card snapshot and deck checks.
+    """
     if ease not in (1, 2, 3, 4):
         raise ValueError('无效的复习评分。')
     if api('getActiveProfile', {}) != question['profile']:
@@ -1953,8 +2099,7 @@ def submit_review(api, cfg, question, ease, answer=None):
     current = api('cardsInfo', {'cards': [question['card_id']]}) or []
     if not current or any(current[0].get(key) != value for key, value in question['snapshot'].items()):
         raise ValueError('这张卡片已发生变化，请在下次提醒时复习。')
-    suffix = 'is:new' if question['kind'] == 'new' else 'is:due'
-    query = _search(cfg) + ' cid:%s %s' % (question['card_id'], suffix)
+    query = collection_queries.queue_card_query(_search(cfg), question['card_id'], question['kind'])
     if question['card_id'] not in (api('findCards', {'query': query}) or []):
         raise ValueError('这张卡片已不在当前待复习队列中。')
     stats = _stats(api, cfg['deck'])
@@ -1962,7 +2107,6 @@ def submit_review(api, cfg, question, ease, answer=None):
                  int(stats.get('learn_count', 0)) + int(stats.get('review_count', 0)))
     if int(remaining) <= 0:
         raise ValueError('这个牌组今天的复习额度已用完。')
-    result = (answer(question, ease) if answer else
-              api('answerCards', {'answers': [{'cardId': question['card_id'], 'ease': ease}]}))
+    result = _answer_card(api, question['card_id'], ease)
     if result != [True]:
         raise ValueError('Anki 没有确认保存评分，请检查 Anki 后再试。')

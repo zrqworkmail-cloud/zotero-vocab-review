@@ -166,6 +166,73 @@ def cfg(**extra):
     return dict(base, **extra)
 
 
+def legacy_selection_entries(config):
+    """The pre-D1 implementation, kept as the oracle for the parity test below."""
+    books = {book['id']: book for book in logic.study_books(config)}
+    raw = (config or {}).get('study_selection')
+    entries = []
+    if isinstance(raw, list):
+        seen = set()
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            book_id = str(item.get('book') or '').strip()
+            if book_id not in books or book_id in seen:
+                continue
+            seen.add(book_id)
+            tags = [str(tag).strip() for tag in (item.get('tags') or []) if str(tag).strip()]
+            entries.append({'book': books[book_id], 'tags': tags})
+    if entries:
+        return entries
+    legacy = logic.study_book_id(config)
+    if legacy:
+        return [{'book': books[legacy], 'tags': []}]
+    return []
+
+
+def legacy_current_entries(config):
+    entries = legacy_selection_entries(config)
+    index = (config or {}).get('_selection_index')
+    if index is not None:
+        entries = [entries[index]] if 0 <= index < len(entries) else []
+    vocab = (config or {}).get('_untagged_vocab') or {}
+    for entry in entries:
+        if logic.UNTAGGED in entry['tags'] and entry['book']['id'] in vocab:
+            entry['_untagged_exclude'] = vocab[entry['book']['id']]
+    return entries
+
+
+def legacy_entry_view(config, index):
+    entries = legacy_selection_entries(config)
+    if index is None or not 0 <= index < len(entries):
+        return None
+    view = dict(config)
+    view['_selection_index'] = index
+    view['study_book'] = entries[index]['book']['id']
+    return view
+
+
+def legacy_expand_untagged(api, config):
+    wanted = [entry for entry in legacy_selection_entries(config)
+              if logic.UNTAGGED in entry['tags']]
+    if not wanted:
+        return config
+    vocab = dict((config or {}).get('_untagged_vocab') or {})
+    for entry in wanted:
+        book = entry['book']
+        if book['id'] not in vocab:
+            vocab[book['id']] = [tag for tag, _count in logic.book_tag_counts(api, config, book)
+                                 if tag != book.get('tag')]
+    return dict(config, _untagged_vocab=vocab)
+
+
+def legacy_clause_for(config):
+    entries = legacy_current_entries(config)
+    if len(entries) == 1:
+        return logic.entry_clause(entries[0])
+    return logic.selection_clause(entries)
+
+
 class SelectionEntries(unittest.TestCase):
     def test_a_single_legacy_book_becomes_one_whole_book_entry(self):
         entries = logic.selection_entries(cfg(study_book='core'))
@@ -192,6 +259,114 @@ class SelectionEntries(unittest.TestCase):
     def test_empty_selection_is_empty_not_everything(self):
         self.assertEqual(logic.selection_entries(cfg()), [])
         self.assertEqual(logic.selection_entries(cfg(study_book='ghost')), [])
+
+
+class SelectionEntriesParity(unittest.TestCase):
+    def test_selection_entries_matches_the_previous_implementation(self):
+        custom_books = [
+            {'id': 'core', 'name': '核心', 'tag': 'zvr_core', 'colour': 'red'},
+            {'id': 'lit', 'name': '文献', 'deck': 'Literature', 'note': None},
+            {'id': 'empty', 'name': '空', 'deck': '', 'tag': ''},
+        ]
+        cases = {
+            'legacy book': cfg(study_book='core'),
+            'ordered subset': cfg(study_selection=[
+                {'book': 'full', 'tags': [' 高频 ', '']},
+                {'book': 'ghost'},
+                'not a dict',
+                {'book': 'lit', 'tags': [None, 0, '真题']},
+            ]),
+            'duplicate keeps first': cfg(study_selection=[
+                {'book': 'core', 'tags': ['高频']},
+                {'book': 'core', 'tags': ['真题']},
+            ]),
+            'custom catalogue keys': cfg(
+                study_books=custom_books,
+                study_selection=[{'book': 'core', 'tags': ['x']}, {'book': 'lit'}],
+            ),
+            'empty list falls back to legacy': cfg(study_book='core', study_selection=[]),
+            'unknown legacy': cfg(study_book='ghost'),
+        }
+        for label, config in cases.items():
+            with self.subTest(label):
+                self.assertEqual(logic.selection_entries(config), legacy_selection_entries(config))
+
+
+class SelectionEntryBoundaryParity(unittest.TestCase):
+    def test_model_and_dict_inputs_produce_identical_outputs(self):
+        cases = [
+            [{'book': BOOKS[0], 'tags': []}],
+            [{'book': BOOKS[1], 'tags': ['高频', '真题']}],
+            [{'book': BOOKS[1], 'tags': [logic.UNTAGGED],
+              '_untagged_exclude': ['高频', '真题']}],
+            [{'book': BOOKS[0], 'tags': []}, {'book': BOOKS[1], 'tags': ['高频']}],
+            [{'book': {'id': 'empty', 'name': '空', 'deck': '', 'tag': ''}, 'tags': []}],
+        ]
+        for entries in cases:
+            models = [logic.SelectionEntry.from_mapping(entry) for entry in entries]
+            for raw_entry, model_entry in zip(entries, models):
+                with self.subTest(entry=raw_entry):
+                    self.assertEqual(logic.entry_clause(raw_entry), logic.entry_clause(model_entry))
+            self.assertEqual(logic.selection_clause(entries), logic.selection_clause(models))
+            self.assertEqual(logic._selection_cache_key(entries), logic._selection_cache_key(models))
+            self.assertEqual(logic.selection_labels(entries), logic.selection_labels(models))
+
+    def test_untagged_exclude_injection_survives_the_model_boundary(self):
+        config = cfg(study_selection=[{'book': 'full', 'tags': [logic.UNTAGGED]}])
+        config['_untagged_vocab'] = {'full': ['高频', '真题']}
+        entries = logic.current_entries(config)
+        self.assertEqual(entries[0]['_untagged_exclude'], ['高频', '真题'])
+        expected = ' tag:"zvr_cet6_full" AND (-tag:"高频" AND -tag:"真题")'
+        self.assertEqual(logic.entry_clause(entries[0]), expected)
+
+        model = logic.SelectionEntry.from_mapping(entries[0])
+        self.assertEqual(model.untagged_exclude, ('高频', '真题'))
+        self.assertEqual(model.to_mapping()['_untagged_exclude'], ['高频', '真题'])
+        self.assertEqual(logic.entry_clause(model), expected)
+
+
+class CurrentEntriesBoundaryParity(unittest.TestCase):
+    def test_current_entries_and_entry_view_match_the_legacy_dict_boundary(self):
+        custom_books = [
+            {'id': 'core', 'name': '核心', 'tag': 'zvr_core', 'colour': 'red'},
+            {'id': 'full', 'name': '全表', 'tag': 'zvr_full'},
+            {'id': 'lit', 'name': '文献', 'deck': 'Literature'},
+        ]
+        cases = [
+            cfg(study_selection=[{'book': 'core'}, {'book': 'full', 'tags': ['高频']}]),
+            cfg(study_selection=[{'book': 'core'}, {'book': 'full'}], _selection_index=1),
+            cfg(study_selection=[{'book': 'full', 'tags': [logic.UNTAGGED]}],
+                _untagged_vocab={'full': ['高频', '真题']}),
+            cfg(study_selection=[{'book': 'full', 'tags': [logic.UNTAGGED]}],
+                _untagged_vocab={'full': []}),
+            cfg(study_books=custom_books,
+                study_selection=[{'book': 'core', 'tags': ['x']}, {'book': 'lit'}]),
+            cfg(study_book='core'),
+            cfg(),
+        ]
+        for config in cases:
+            with self.subTest(config=config):
+                self.assertEqual(logic.current_entries(config), legacy_current_entries(config))
+                for index in (None, 0, 1, 9):
+                    self.assertEqual(logic.entry_view(config, index), legacy_entry_view(config, index))
+
+
+class ExpandAndClauseBoundaryParity(unittest.TestCase):
+    def test_expand_untagged_and_clause_for_match_the_legacy_cfg_boundary(self):
+        cases = [
+            cfg(study_book='core'),
+            cfg(study_selection=[{'book': 'core'}, {'book': 'full', 'tags': ['高频']}]),
+            cfg(study_selection=[{'book': 'full', 'tags': [logic.UNTAGGED]}]),
+            cfg(study_selection=[{'book': 'full', 'tags': [logic.UNTAGGED]}],
+                _untagged_vocab={'full': ['高频']}),
+            cfg(study_selection=[{'book': 'core'}, {'book': 'full', 'tags': [logic.UNTAGGED]}],
+                _selection_index=1),
+        ]
+        for config in cases:
+            with self.subTest(config=config):
+                self.assertEqual(logic._expand_untagged(UntaggedAnki(), dict(config)),
+                                 legacy_expand_untagged(UntaggedAnki(), dict(config)))
+                self.assertEqual(logic._clause_for(config), legacy_clause_for(config))
 
 
 class Clauses(unittest.TestCase):
