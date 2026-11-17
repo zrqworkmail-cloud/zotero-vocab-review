@@ -61,6 +61,10 @@ def build(card_open, hide_enabled, visible=None, syncing=False, tray=False, forc
         # Its tray-menu 退出 sets it to True and then calls mw.close(), so the value is how a
         # close says whether it came from the X button or from an exit the user asked for.
         mw.closeEventFromAction = bool(exiting)
+        mw.systemTray = types.SimpleNamespace(
+            explicitlyHiddenWindows=[], isMinimizedToTray=False, snapshot_calls=0)
+        mw.systemTray._snapshotWindowStates = lambda: setattr(
+            mw.systemTray, 'snapshot_calls', mw.systemTray.snapshot_calls + 1)
     if forcing:
         mw.zvr_force_quit = True
     scope = {'QEvent': QEvent, 'mw': mw,
@@ -130,6 +134,12 @@ class CloseFilter(unittest.TestCase):
         self.assertEqual(hidden, [True], 'the card must not go to the tray with the main window')
         self.assertEqual((stopped, timer.stopped), ([], []))
         self.assertFalse(mw.closeEventFromAction)
+        self.assertEqual(mw.systemTray.snapshot_calls, 1,
+                         'snapshot other windows before hiding the main one')
+        self.assertEqual(len(mw.systemTray.explicitlyHiddenWindows), 1)
+        self.assertIs(mw.systemTray.explicitlyHiddenWindows[0], mw)
+        self.assertTrue(mw.systemTray.isMinimizedToTray,
+                        'the tray must know the main window is the one to restore')
 
     def test_a_card_that_is_only_still_referenced_does_not_block_the_quit(self):
         """The hide is for a card the user can see; a leftover reference must not count."""

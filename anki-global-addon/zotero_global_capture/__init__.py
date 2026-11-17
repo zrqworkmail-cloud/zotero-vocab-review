@@ -25,6 +25,8 @@ from aqt.qt import (
 )
 
 from .background import configure_login_start
+from .anki_connect import AnkiConnectAdapter
+from .config_schema import CURRENT_CONFIG_VERSION, migrate
 from . import card_motion
 from .review_popup import DesktopReviewController, enable_click_away, popup_style
 from .review_logic import (BOOK_MIGRATION, apply_auto_sync_preference, book_clause, book_label, book_progress,
@@ -36,6 +38,7 @@ from .review_logic import (BOOK_MIGRATION, apply_auto_sync_preference, book_clau
 from .exam_dates import fetch_cet
 from .selection_ui import SelectionPicker
 from .study_dashboard import activity_counts, dashboard_html
+from .vocabulary import note_payload_from_values
 from . import core_import, cet6_books, cet6_listening, audio_volume, speech, review_logic, review_quality
 
 
@@ -132,15 +135,13 @@ def log_runtime(event):
 
 
 def settings():
-    value = dict(DEFAULTS)
     stored = mw.addonManager.getConfig(ADDON) or {}
-    value.update(stored)
-    if 'review_auto_example_mode' not in stored and stored.get('review_auto_example'):
-        value['review_auto_example_mode'] = 'example'
-    return value
+    return migrate(stored, DEFAULTS)
 
 
 def save_settings(value):
+    value = dict(value)
+    value['config_version'] = CURRENT_CONFIG_VERSION
     mw.addonManager.writeConfig(ADDON, value)
 
 
@@ -553,6 +554,7 @@ class Controller:
         self.bridge.result.connect(self.on_result)
         self.bridge.write_result.connect(self.on_write_result)
         self.bridge.status.connect(lambda text: show_feedback(text, period=5000))
+        self.anki = AnkiConnectAdapter(api)
         self.listener = NativeListener(self.bridge, settings())
         self.listener.start()
         self.pending = None
@@ -562,7 +564,7 @@ class Controller:
         self.pending_timer.timeout.connect(self.cancel_pending)
         self.busy = False
         self.last_auto = ("", 0)
-        self.review = DesktopReviewController(settings, api, show_feedback, log_runtime)
+        self.review = DesktopReviewController(settings, self.anki, show_feedback, log_runtime)
         self.main_close_filter = None
         self.sync_timer = None
         self.quit_timer = None
@@ -704,11 +706,11 @@ class Controller:
 
     def write_note(self, word, info, cfg):
         model = cfg["model"]
-        fields = api("modelFieldNames", {"modelName": model})
+        fields = self.anki("modelFieldNames", {"modelName": model})
         if cfg["front_field"] not in fields or cfg["back_field"] not in fields:
             raise RuntimeError("Anki 笔记类型或正面/解释字段不匹配，请打开全局划词设置。")
-        note_ids = api("findNotes", {"query": '"%s"' % word.replace('"', '\\"')}) or []
-        notes = api("notesInfo", {"notes": note_ids}) if note_ids else []
+        note_ids = self.anki("findNotes", {"query": '"%s"' % word.replace('"', '\\"')}) or []
+        notes = self.anki("notesInfo", {"notes": note_ids}) if note_ids else []
         normalized = re.sub(r"<[^>]*>", "", word).strip().casefold()
         note = next((candidate for candidate in notes if candidate.get("modelName") == model
                      and html.unescape(re.sub(r"<[^>]*>", "", candidate.get("fields", {}).get(cfg["front_field"], {}).get("value", ""))).strip().casefold() == normalized), None)
@@ -738,8 +740,8 @@ class Controller:
             for field, value in optional.items():
                 if field in fields and value and not note.get("fields", {}).get(field, {}).get("value", "").strip():
                     updates[field] = html.escape(value).replace("\n", "<br>") if not value.startswith("<a ") else value
-            api("updateNoteFields", {"note": {"id": note["noteId"], "fields": updates}})
-            api("addTags", {"notes": [note["noteId"]], "tags": ANKI_TAG})
+            self.anki("updateNoteFields", {"note": {"id": note["noteId"], "fields": updates}})
+            self.anki("addTags", {"notes": [note["noteId"]], "tags": ANKI_TAG})
             if count_match:
                 return "已更新重复词卡：%s（第 %s 次）" % (word, count)
             return "已补充到已有词卡：%s" % word
@@ -750,9 +752,8 @@ class Controller:
         for field, value in optional.items():
             if field in values and value:
                 values[field] = html.escape(value).replace("\n", "<br>") if not value.startswith("<a ") else value
-        api("addNote", {"note": {"deckName": cfg["deck"], "modelName": model,
-                                  "fields": values, "tags": [ANKI_TAG],
-                                  "options": {"allowDuplicate": False}}})
+        self.anki("addNote", {"note": note_payload_from_values(
+            values, cfg["deck"], model, tags=(ANKI_TAG,))})
         log_runtime("Anki addNote succeeded")
         return "已添加到 Anki：%s" % word
 
@@ -1601,7 +1602,7 @@ def browse_core_words():
 def add_review_to_toolbar(links, toolbar):
     # Links are rebuilt as HTML strings each time Anki runs this hook, so the current
     # scope can be named here; a saved change shows up on the next toolbar rebuild.
-    labels = selection_labels(settings())
+    labels = selection_labels(selection_entries(settings()))
     name = '、'.join(labels) if labels else '未选词书'
     links.append(toolbar.create_link(
         'zvr-desktop-review', '开始学习 · %s' % name, open_review_from_toolbar,
@@ -1825,6 +1826,25 @@ class MainWindowCloseFilter(QObject):
                     controller.sync_timer.stop()
                 abort_media_sync()
             if hiding:
+                # The tray add-on only restores windows it recorded in
+                # explicitlyHiddenWindows.  Hiding mw directly would otherwise leave it
+                # visible to Qt but absent from that list, so a tray click could never
+                # bring it back (2026-11-17).
+                tray_addon = getattr(mw, "systemTray", None)
+                if tray_addon is not None:
+                    try:
+                        snapshot = getattr(tray_addon, "_snapshotWindowStates", None)
+                        if callable(snapshot):
+                            snapshot()
+                        hidden_windows = list(
+                            getattr(tray_addon, "explicitlyHiddenWindows", []) or [])
+                        if mw not in hidden_windows:
+                            hidden_windows.append(mw)
+                        tray_addon.explicitlyHiddenWindows = hidden_windows
+                        tray_addon.isMinimizedToTray = True
+                    except Exception as error:
+                        log_runtime("tray state handoff failed: %s"
+                                    % type(error).__name__)
                 event.ignore()
                 mw.hide()
                 show_feedback('已隐藏 Anki 主窗口，随身复习卡继续。要真正退出，点卡片右上角「…」里的「退出 Anki」。', period=8000)
