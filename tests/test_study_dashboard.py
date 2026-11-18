@@ -39,17 +39,23 @@ class StudyDashboardTests(unittest.TestCase):
         today = datetime.date.today()
         now = int(datetime.datetime.combine(today, datetime.time(12)).timestamp() * 1000)
         old = int(datetime.datetime.combine(today - datetime.timedelta(days=28), datetime.time(12)).timestamp() * 1000)
-        counts = module.activity_counts([(1, now), (1, now + 1000), (2, now), (3, old)], {1, 3}, today)
-        self.assertEqual(counts, {today: 1})
+        counts = module.activity_counts(
+            [(1, now, 0), (1, now + 1000, 0), (2, now, 1), (3, old, 0)],
+            {1, 2, 3}, today)
+        self.assertEqual(counts, {today: {'total': 2, 'new': 1, 'review': 1}})
 
     def test_heatmap_has_weekday_headers_streak_and_adaptive_legend(self):
         today = datetime.date(2026, 10, 29)
         plan = {'new': 3, 'due': 1, 'done': 2}
-        history = {today: 2, today - datetime.timedelta(days=1): 4, today - datetime.timedelta(days=2): 1}
+        history = {today: {'total': 2, 'new': 1, 'review': 1},
+                   today - datetime.timedelta(days=1): {'total': 4, 'new': 3, 'review': 1},
+                   today - datetime.timedelta(days=2): {'total': 1, 'new': 1, 'review': 0}}
         result = module.dashboard_html(today, '2026-11-02', plan, history, True)
         self.assertIn('近 28 天连续 3 天', result)
         self.assertIn('颜色按学习日平均量分级', result)
-        self.assertIn('2026-10-29：2 张卡片', result)
+        self.assertIn('2026-10-29：新学 1 个单词 · 复习 1 个单词', result)
+        self.assertIn('2026-10-02：新学 0 个单词 · 复习 0 个单词', result)
+        self.assertIn('<button type="button" class="zvr-cell', result)
         self.assertIn('outline:2px solid', result)
         self.assertEqual(result.count('<i style='), 5)
         yesterday_only = {today - datetime.timedelta(days=1): 2, today - datetime.timedelta(days=2): 1}
@@ -62,7 +68,9 @@ class StudyDashboardTests(unittest.TestCase):
         self.assertIn('id="zvr-home-start"', content)
         self.assertIn("pycmd('zvr-start-review')", content)
         self.assertIn('六级全表', content)
-        self.assertIn('margin:28px auto', content)
+        self.assertIn('max-width:420px', content)
+        self.assertIn('margin:14px auto 6px', content)
+        self.assertIn('padding:12px 18px', content)
         self.assertIn('text-align:center', content)
         escaped = module.home_cta_html('<b>词书</b>')
         self.assertIn('&lt;b&gt;词书&lt;/b&gt;', escaped)
@@ -76,7 +84,8 @@ class StudyDashboardTests(unittest.TestCase):
         self.assertIn('今日建议新词 <b>2</b>', content)
         self.assertIn('待复习 <b>4</b>', content)
         self.assertIn('今日已学习 <b>5</b>', content)
-        self.assertEqual(content.count('<span title='), 28)
+        self.assertEqual(content.count('class="zvr-cell'), 28)
+        self.assertEqual(content.count('data-tip='), 28)
         self.assertIn('#202b3d', content)
         self.assertEqual(module.dashboard_html(today, '', plan, {}), '')
         self.assertIn('已结束', module.dashboard_html(today, '2026-10-28', plan, {}))

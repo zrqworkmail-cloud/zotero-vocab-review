@@ -1748,7 +1748,9 @@ def add_study_dashboard(_browser, content):
         for deck_name in resolve_book_decks(collection_api, cfg):
             selected.update(mw.col.find_cards('deck:"%s" %s' % (escape(deck_name), base)))
         start = datetime.datetime.combine(today - datetime.timedelta(days=27), datetime.time.min).timestamp()
-        rows = mw.col.db.all('select cid, id from revlog where id >= ?', int(start * 1000))
+        # `type` distinguishes new learning (0) from reviews/relearning (1/2/3);
+        # keep it in the same read so the heatmap tooltip needs no second query.
+        rows = mw.col.db.all('select cid, id, type from revlog where id >= ?', int(start * 1000))
         activity = activity_counts(rows, selected, today)
         content.stats += dashboard_html(today, cfg.get('review_deadline', ''), plan, activity,
                                         bool(theme_manager.night_mode), cfg.get('review_plan_mode') == 'daily')

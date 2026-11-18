@@ -5,15 +5,36 @@ import html
 
 
 def activity_counts(rows, selected_ids, today):
+    """Return distinct-card totals plus the new/review split for each local day.
+
+    Anki's revlog `type` is 0 for learning (a new card), 1/2 for review/relearning,
+    and 3 for a filtered-deck review.  Count distinct cards per bucket so repeated
+    learning steps on one day do not inflate the number the learner sees.
+    """
     selected = set(selected_ids)
     counts = {}
-    for card_id, reviewed_ms in rows:
+    for row in rows:
+        if len(row) < 2:
+            continue
+        card_id, reviewed_ms = row[0], row[1]
         if card_id not in selected:
             continue
         day = datetime.datetime.fromtimestamp(reviewed_ms / 1000).date()
-        if 0 <= (today - day).days < 28:
-            counts.setdefault(day, set()).add(card_id)
-    return {day: len(cards) for day, cards in counts.items()}
+        if not 0 <= (today - day).days < 28:
+            continue
+        buckets = counts.setdefault(day, {'total': set(), 'new': set(), 'review': set()})
+        buckets['total'].add(card_id)
+        try:
+            review_type = int(row[2])
+        except (IndexError, TypeError, ValueError):
+            review_type = None
+        if review_type == 0:
+            buckets['new'].add(card_id)
+        elif review_type in (1, 2, 3):
+            buckets['review'].add(card_id)
+    return {day: {'total': len(buckets['total']), 'new': len(buckets['new']),
+                  'review': len(buckets['review'])}
+            for day, buckets in counts.items()}
 
 
 def home_cta_html(book_name, dark=False):
@@ -22,17 +43,17 @@ def home_cta_html(book_name, dark=False):
     bg, fg, muted, border, accent = palette
     label = html.escape(book_name or '未选词书')
     return '''<style>
-#zvr-home-start{max-width:520px;margin:28px auto 10px;padding:22px 24px;border:1px solid %s;
- border-radius:18px;background:%s;color:%s;text-align:center;box-sizing:border-box;
- box-shadow:0 12px 30px rgba(0,0,0,.12);font-family:'Segoe UI','Microsoft YaHei',sans-serif}
-#zvr-home-start .zvr-home-kicker{font-size:12px;color:%s;letter-spacing:.12em}
-#zvr-home-start .zvr-home-title{font-size:22px;line-height:1.3;font-weight:750;margin:6px 0 16px}
-#zvr-home-start .zvr-home-button{display:inline-block;border:none;border-radius:999px;padding:12px 28px;
- background:%s;color:#fff;font-size:16px;font-weight:700;cursor:pointer;
- box-shadow:0 8px 18px rgba(0,0,0,.18);transition:background .15s,transform .15s}
+#zvr-home-start{max-width:420px;margin:14px auto 6px;padding:12px 18px;border:1px solid %s;
+ border-radius:14px;background:%s;color:%s;text-align:center;box-sizing:border-box;
+ box-shadow:0 10px 24px rgba(0,0,0,.10);font-family:'Segoe UI','Microsoft YaHei',sans-serif}
+#zvr-home-start .zvr-home-kicker{font-size:11px;color:%s;letter-spacing:.08em}
+#zvr-home-start .zvr-home-title{font-size:17px;line-height:1.25;font-weight:750;margin:2px 0 9px}
+#zvr-home-start .zvr-home-button{display:inline-block;border:none;border-radius:999px;padding:8px 20px;
+ background:%s;color:#fff;font-size:14px;font-weight:700;cursor:pointer;
+ box-shadow:0 6px 14px rgba(0,0,0,.16);transition:background .15s,transform .15s}
 #zvr-home-start .zvr-home-button:hover{background:%s;transform:translateY(-1px)}
 #zvr-home-start .zvr-home-button:focus{outline:3px solid %s;outline-offset:3px}
-#zvr-home-start .zvr-home-hint{font-size:12px;color:%s;margin-top:12px}
+#zvr-home-start .zvr-home-hint{font-size:11px;color:%s;margin-top:7px}
 </style><section id="zvr-home-start" aria-label="开始学习">
 <div class="zvr-home-kicker">单词随身复习</div>
 <div class="zvr-home-title">今天从词书开始</div>
@@ -57,21 +78,44 @@ def dashboard_html(today, deadline, plan, activity, dark=False, auto_plan=False)
     first_day = today - datetime.timedelta(days=27)
     weekdays = '一二三四五六日'
     weekday_labels = ''.join('<span>%s</span>' % weekdays[(first_day.weekday() + n) % 7] for n in range(7))
-    active = [count for day, count in activity.items() if first_day <= day <= today and count > 0]
+    def activity_total(entry):
+        if isinstance(entry, dict):
+            return int(entry.get('total') or 0)
+        return int(entry or 0)
+
+    active = [activity_total(activity.get(day, 0)) for day in activity
+              if first_day <= day <= today and activity_total(activity.get(day, 0)) > 0]
     average = sum(active) / len(active) if active else 1
     colors = (['#29354a', '#344c6b', '#496b9c', '#687fd2', '#9aaeff'] if dark else
               ['#e5eaf2', '#d1ddf9', '#a9bbf2', '#7c93e0', '#536bd0'])
     squares = []
     for offset in range(27, -1, -1):
         day = today - datetime.timedelta(days=offset)
-        count = activity.get(day, 0)
+        entry = activity.get(day, {'total': 0, 'new': 0, 'review': 0})
+        count = activity_total(entry)
+        if isinstance(entry, dict):
+            new_count = int(entry.get('new') or 0)
+            review_count = int(entry.get('review') or 0)
+            detail = '%s：新学 %d 个单词 · 复习 %d 个单词' % (day.isoformat(), new_count, review_count)
+        else:
+            detail = '%s：%d 张卡片' % (day.isoformat(), count)
         level = 0 if not count else 1 if count < average * 0.5 else 2 if count < average else 3 if count < average * 2 else 4
         outline = ';outline:2px solid %s;outline-offset:1px' % accent if day == today else ''
-        squares.append('<span title="%s：%d 张卡片" aria-label="%s：%d 张卡片" style="background:%s%s"></span>' %
-                       (day.isoformat(), count, day.isoformat(), count, colors[level], outline))
+        column = (27 - offset) % 7
+        classes = ['zvr-cell']
+        if offset >= 21:
+            classes.append('zvr-top')
+        if column < 2:
+            classes.append('zvr-left')
+        elif column > 4:
+            classes.append('zvr-right')
+        squares.append('<button type="button" class="%s" title="%s" data-tip="%s" '
+                       'aria-label="%s" style="background:%s%s"></button>' %
+                       (' '.join(classes), html.escape(detail), html.escape(detail),
+                        html.escape(detail), colors[level], outline))
     streak = 0
-    cursor = today if activity.get(today, 0) else today - datetime.timedelta(days=1)
-    while cursor >= first_day and activity.get(cursor, 0):
+    cursor = today if activity_total(activity.get(today, 0)) else today - datetime.timedelta(days=1)
+    while cursor >= first_day and activity_total(activity.get(cursor, 0)):
         streak += 1
         cursor -= datetime.timedelta(days=1)
     streak_text = ('≥%d' % streak if streak == 28 else str(streak))
@@ -113,14 +157,27 @@ def dashboard_html(today, deadline, plan, activity, dark=False, auto_plan=False)
 #zvr-study-dashboard .zvr-weekdays,#zvr-study-dashboard .zvr-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:5px}
 #zvr-study-dashboard .zvr-weekdays{font-size:11px;text-align:center;margin-top:8px;color:%s}
 #zvr-study-dashboard .zvr-grid{margin-top:4px}
-#zvr-study-dashboard .zvr-grid span{height:15px;border-radius:4px}
+#zvr-study-dashboard .zvr-grid .zvr-cell{position:relative;display:block;width:100%%;height:15px;padding:0;
+ border:0;border-radius:4px;font:inherit;cursor:pointer;appearance:none}
+#zvr-study-dashboard .zvr-grid .zvr-cell:hover,#zvr-study-dashboard .zvr-grid .zvr-cell:focus{z-index:3}
+#zvr-study-dashboard .zvr-grid .zvr-cell::after{content:attr(data-tip);position:absolute;left:50%%;
+ bottom:calc(100%% + 7px);transform:translateX(-50%%);z-index:20;min-width:180px;max-width:245px;
+ padding:7px 9px;border:1px solid rgba(255,255,255,.14);border-radius:8px;background:#101827;
+ color:#f8fafc;font-size:11px;font-weight:500;line-height:1.45;text-align:left;white-space:normal;
+ box-shadow:0 8px 20px rgba(0,0,0,.28);opacity:0;visibility:hidden;pointer-events:none;
+ transition:opacity .12s ease,visibility .12s ease}
+#zvr-study-dashboard .zvr-grid .zvr-cell:hover::after,#zvr-study-dashboard .zvr-grid .zvr-cell:focus::after{
+ opacity:1;visibility:visible}
+#zvr-study-dashboard .zvr-grid .zvr-cell.zvr-top::after{top:calc(100%% + 7px);bottom:auto}
+#zvr-study-dashboard .zvr-grid .zvr-cell.zvr-left::after{left:0;transform:none}
+#zvr-study-dashboard .zvr-grid .zvr-cell.zvr-right::after{left:auto;right:0;transform:none}
 #zvr-study-dashboard .zvr-legend{display:flex;align-items:center;gap:4px;margin-top:8px;font-size:11px;color:%s}
 #zvr-study-dashboard .zvr-legend i{display:block;width:12px;height:12px;border-radius:3px}
 @media(max-width:700px){#zvr-study-dashboard{position:static;width:min(100%%,280px);margin:16px auto}}
 </style><aside id="zvr-study-dashboard" aria-label="考试与学习计划">
 %s%s
 <div class="zvr-small">近 28 天学习记录 · 近 28 天连续 %s 天</div>
-<div class="zvr-weekdays">%s</div><div class="zvr-grid">%s</div>
+<div class="zvr-weekdays">%s</div><div class="zvr-grid" role="group" aria-label="近 28 天每日新学与复习单词数">%s</div>
 <div class="zvr-legend">少 %s 多 <span>· 颜色按学习日平均量分级</span></div></aside>''' % (
         bg, fg, border, muted, accent, muted, muted, countdown, plan_content,
         streak_text, weekday_labels, ''.join(squares), legend)
