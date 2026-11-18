@@ -1,8 +1,8 @@
-"""The main-screen button and the book switcher.
+"""The home-screen study card and the book switcher.
 
-There used to be three toolbar links — a review button and two 词书 shortcuts that
-each rewrote a private scope. Now there is one button that names the book it will
-study, and switching is a separate action that must not fire while a card is open.
+The start action lives in the centre of Anki's deck-browser home page, not in the
+top toolbar. It names the book it will study; switching is a separate action that
+must not fire while a card is open.
 """
 import ast
 import importlib.util
@@ -14,7 +14,8 @@ ROOT = Path(__file__).resolve().parents[1] / 'anki-global-addon' / 'zotero_globa
 path = ROOT / '__init__.py'
 tree = ast.parse(path.read_text(encoding='utf-8'))
 nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef)
-         and n.name in ('add_review_to_toolbar', 'refresh_toolbar', 'choose_study_book')]
+         and n.name in ('study_book_name', 'refresh_toolbar', 'choose_study_book',
+                        'on_webview_message')]
 spec = importlib.util.spec_from_file_location('book_logic_toolbar', ROOT / 'review_logic.py')
 logic = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(logic)
@@ -38,37 +39,41 @@ def environment(config, saved, shown, feedback, drawn=None):
             'open_review_from_toolbar': lambda: None}
 
 
-class Toolbar(unittest.TestCase):
-    def collect(self, config):
-        links = []
-        # create_link returns the link; the production code is what appends it.
-        toolbar = types.SimpleNamespace(create_link=lambda cmd, label, func, **kw: (label, kw))
+class HomeButton(unittest.TestCase):
+    def test_the_start_button_is_not_registered_in_the_top_toolbar(self):
+        source = path.read_text(encoding='utf-8')
+        self.assertNotIn('top_toolbar_did_init_links', source)
+        self.assertNotIn('create_link(', source)
+        self.assertIn('webview_did_receive_js_message.append(on_webview_message)', source)
+
+    def test_the_home_message_starts_a_review_without_swallowing_other_messages(self):
+        calls = []
+        env = environment({'study_book': ''}, [], [], lambda *_a, **_k: None)
+        env['open_review_from_toolbar'] = lambda: calls.append(True)
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), 'exec'), env)
+        self.assertEqual(env['on_webview_message']((False, None), 'other', None), (False, None))
+        self.assertEqual(env['on_webview_message']((False, None), 'zvr-start-review', None), (True, None))
+        self.assertEqual(calls, [True])
+
+    def label(self, config):
         env = environment(config, [], [], lambda *_a, **_k: None)
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), 'exec'), env)
-        env['add_review_to_toolbar'](links, toolbar)
-        return links
+        return env['study_book_name'](config)
 
     def test_one_button_that_names_the_book(self):
-        links = self.collect({'study_book': 'cet6_core'})
-        self.assertEqual(len(links), 1, 'the two 词书 shortcuts are gone')
-        self.assertIn('六级核心', links[0][0])
-        self.assertIn('六级核心', links[0][1]['tip'])
+        self.assertIn('六级核心', self.label({'study_book': 'cet6_core'}))
 
     def test_no_selection_says_so_on_the_button(self):
-        links = self.collect({'study_book': ''})
-        self.assertIn('未选词书', links[0][0])
+        self.assertIn('未选词书', self.label({'study_book': ''}))
 
     def test_a_book_from_config_is_named_not_guessed(self):
-        config = {'study_book': 'literature'}
-        self.assertIn('文献单词', self.collect(config)[0][0])
+        self.assertIn('文献单词', self.label({'study_book': 'literature'}))
 
     def test_a_multi_selection_names_every_book_on_the_button(self):
-        config = {'study_selection': [{'book': 'cet6_core', 'tags': []},
-                                      {'book': 'cet6_full', 'tags': ['高频']}]}
-        label, kw = self.collect(config)[0]
+        label = self.label({'study_selection': [{'book': 'cet6_core', 'tags': []},
+                                                {'book': 'cet6_full', 'tags': ['高频']}]})
         self.assertIn('六级核心', label)
         self.assertIn('六级全表', label)
-        self.assertIn('六级全表', kw['tip'])
 
 
 class Switching(unittest.TestCase):

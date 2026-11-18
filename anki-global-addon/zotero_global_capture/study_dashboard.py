@@ -16,6 +16,31 @@ def activity_counts(rows, selected_ids, today):
     return {day: len(cards) for day, cards in counts.items()}
 
 
+def home_cta_html(book_name, dark=False):
+    """The centred study button on Anki's deck-browser home screen."""
+    palette = ('#202b3d', '#e8eef9', '#aebed7', '#40516a', '#788ef0') if dark else ('#ffffff', '#23314b', '#61718e', '#e1e7f1', '#586bd1')
+    bg, fg, muted, border, accent = palette
+    label = html.escape(book_name or '未选词书')
+    return '''<style>
+#zvr-home-start{max-width:520px;margin:28px auto 10px;padding:22px 24px;border:1px solid %s;
+ border-radius:18px;background:%s;color:%s;text-align:center;box-sizing:border-box;
+ box-shadow:0 12px 30px rgba(0,0,0,.12);font-family:'Segoe UI','Microsoft YaHei',sans-serif}
+#zvr-home-start .zvr-home-kicker{font-size:12px;color:%s;letter-spacing:.12em}
+#zvr-home-start .zvr-home-title{font-size:22px;line-height:1.3;font-weight:750;margin:6px 0 16px}
+#zvr-home-start .zvr-home-button{display:inline-block;border:none;border-radius:999px;padding:12px 28px;
+ background:%s;color:#fff;font-size:16px;font-weight:700;cursor:pointer;
+ box-shadow:0 8px 18px rgba(0,0,0,.18);transition:background .15s,transform .15s}
+#zvr-home-start .zvr-home-button:hover{background:%s;transform:translateY(-1px)}
+#zvr-home-start .zvr-home-button:focus{outline:3px solid %s;outline-offset:3px}
+#zvr-home-start .zvr-home-hint{font-size:12px;color:%s;margin-top:12px}
+</style><section id="zvr-home-start" aria-label="开始学习">
+<div class="zvr-home-kicker">单词随身复习</div>
+<div class="zvr-home-title">今天从词书开始</div>
+<button type="button" class="zvr-home-button" onclick="pycmd('zvr-start-review')">开始学习 · %s</button>
+<div class="zvr-home-hint">换词书：工具 → 切换词书</div>
+</section>''' % (border, bg, fg, muted, accent, accent, accent, muted, label)
+
+
 def dashboard_html(today, deadline, plan, activity, dark=False, auto_plan=False):
     if not deadline and not auto_plan:
         return ''

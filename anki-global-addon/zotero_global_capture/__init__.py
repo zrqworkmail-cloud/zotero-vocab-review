@@ -20,7 +20,7 @@ from ctypes import wintypes
 from aqt import gui_hooks, mw
 from aqt.qt import (
     QApplication, QCheckBox, QComboBox, QDate, QDateEdit, QDialog, QDialogButtonBox, QEvent, QFormLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton, QRadioButton, QScrollArea, QTimer, QVBoxLayout,
+    QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton, QRadioButton, QScrollArea, QTabWidget, QTimer, QVBoxLayout,
     QWidget, QObject, pyqtSignal, Qt, QCursor, QSpinBox, QTime, QTimeEdit,
 )
 
@@ -37,7 +37,7 @@ from .review_logic import (BOOK_MIGRATION, apply_auto_sync_preference, book_clau
                            validate_windows, window_minutes)
 from .exam_dates import fetch_cet
 from .selection_ui import SelectionPicker
-from .study_dashboard import activity_counts, dashboard_html
+from .study_dashboard import activity_counts, dashboard_html, home_cta_html
 from .vocabulary import note_payload_from_values
 from . import core_import, cet6_books, cet6_listening, audio_volume, speech, review_logic, review_quality
 
@@ -801,7 +801,7 @@ def open_settings(parent=None):
     dialog = QDialog(parent if isinstance(parent, QWidget) else mw)
     dialog.setWindowTitle("全局划词入 Anki")
     style = '''
-        QDialog, QWidget#settingsBody { background: #f4f6fb; color: #25334d; }
+        QDialog, QWidget#settingsPage { background: #f4f6fb; color: #25334d; }
         QLabel, QCheckBox { color: #25334d; background: transparent; }
         QComboBox, QSpinBox, QDateEdit, QTimeEdit, QLineEdit { background: #ffffff; color: #25334d; border: 1px solid #dce4f1;
             border-radius: 7px; padding: 5px 9px; min-height: 24px; }
@@ -815,6 +815,9 @@ def open_settings(parent=None):
         QPushButton#saveSettings:hover { background: #4557b5; }
         QPushButton#saveSettings:disabled { background: #dce1ec; color: #7b8798; }
         QScrollArea { border: none; background: #f4f6fb; }
+        QTabWidget::pane { border: none; background: transparent; }
+        QTabBar::tab { background: #e8edf7; color: #4a5a75; padding: 8px 18px; margin-right: 4px; border-radius: 8px; }
+        QTabBar::tab:selected { background: #5668ca; color: #ffffff; }
         QGroupBox { background: #ffffff; color: #25334d; font-weight: 600; border: 1px solid #dce4f1; border-radius: 9px; margin-top: 12px; padding: 14px 10px 8px; }
         QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 5px; }
     '''
@@ -830,6 +833,7 @@ def open_settings(parent=None):
             '#536bd6': '#aab8ff', '#e8edff': '#34415d', '#172554': '#f2f4ff',
             '#96a0b1': '#aab4c5', '#5668ca': '#596dd1', '#4557b5': '#6e80df',
             '#dce1ec': '#343d4c', '#7b8798': '#aab4c5',
+            '#e8edf7': '#2b3447', '#4a5a75': '#c8d2e2',
         }.items():
             style = style.replace(old, new)
         style += '''
@@ -841,18 +845,28 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
 '''
     dialog.setStyleSheet(style)
     outer = QVBoxLayout(dialog)
-    scroll = QScrollArea(dialog)
-    scroll.setWidgetResizable(True)
-    form_widget = QWidget()
-    form_widget.setObjectName('settingsBody')
-    sections = QVBoxLayout(form_widget)
-    def section(title):
+    tabs = QTabWidget()
+    tabs.setObjectName('settingsTabs')
+    outer.addWidget(tabs)
+    def tab(title):
+        page = QWidget()
+        page.setObjectName('settingsPage')
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(page)
+        tabs.addTab(scroll, title)
+        return page_layout
+    tab_common = tab('常用')
+    tab_review = tab('复习与词书')
+    tab_plan = tab('学习计划')
+    tab_card = tab('卡片与朗读')
+    def section(page_layout, title):
         group = QGroupBox(title)
         layout = QFormLayout(group)
-        sections.addWidget(group)
+        page_layout.addWidget(group)
         return layout
-    scroll.setWidget(form_widget)
-    outer.addWidget(scroll)
     dialog.resize(620, 700)
     mode = QComboBox()
     mode.setObjectName('captureMode')
@@ -1134,7 +1148,7 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     review_beautify.setChecked(bool(cfg["review_beautify"]))
     review_start_at_login = QCheckBox("Windows 登录时启动 Anki 后台复习")
     review_start_at_login.setChecked(bool(cfg["review_start_at_login"]))
-    form = section('划词与 Anki 同步')
+    form = section(tab_common, '划词与 Anki 同步')
     form.addRow("收词方式", mode)
     form.addRow("Anki 牌组", deck)
     form.addRow("笔记类型", model)
@@ -1144,7 +1158,7 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     form.addRow("全局快捷键", shortcut)
     form.addRow(shortcut_status)
     form.addRow(QLabel("点击快捷键输入框后按组合键；自动收词会暂存并恢复剪贴板。"))
-    form = section('复习提醒')
+    form = section(tab_review, '复习提醒与词书')
     form.addRow("随身复习", review_enabled)
     form.addRow("关闭主窗口", hide_main)
     form.addRow("后台同步", sync_back)
@@ -1158,7 +1172,7 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     extra_help.setWordWrap(True)
     form.addRow(extra_help)
     form.addRow("后台运行", review_start_at_login)
-    form = section('学习计划与考试')
+    form = section(tab_plan, '学习计划与考试')
     form.addRow("学习方式", plan_mode)
     form.addRow("固定每组数量", review_batch)
     batch_help = QLabel()
@@ -1179,7 +1193,7 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     form.addRow("截止日期", deadline_enabled)
     form.addRow("考试日期", deadline)
     form.addRow("今日计划估算", plan_summary)
-    form = section('卡片显示与朗读')
+    form = section(tab_card, '卡片显示与朗读')
     form.addRow("弹出位置", review_position)
     form.addRow("弹窗主题", review_theme)
     form.addRow("练习形式（可多选）", review_modes_widget)
@@ -1621,22 +1635,24 @@ def browse_core_words():
     threading.Thread(target=work, daemon=True).start()
 
 
-def add_review_to_toolbar(links, toolbar):
-    # Links are rebuilt as HTML strings each time Anki runs this hook, so the current
-    # scope can be named here; a saved change shows up on the next toolbar rebuild.
-    labels = selection_labels(selection_entries(settings()))
-    name = '、'.join(labels) if labels else '未选词书'
-    links.append(toolbar.create_link(
-        'zvr-desktop-review', '开始学习 · %s' % name, open_review_from_toolbar,
-        tip='立即弹出「%s」的学习卡；换词组在 工具 → 切换词书' % name, id='zvr-desktop-review'))
+def study_book_name(cfg):
+    labels = selection_labels(selection_entries(cfg))
+    return '、'.join(labels) if labels else '未选词书'
 
 
 def refresh_toolbar():
-    """Rebuild the toolbar after the book changes so its name is not stale until restart."""
+    """Refresh the home screen after the book changes so its CTA is not stale."""
     try:
         mw.toolbar.draw()
     except Exception as error:
         log_runtime('toolbar refresh failed: %s' % type(error).__name__)
+    try:
+        browser = getattr(mw, 'deckBrowser', None)
+        refresh = getattr(browser, 'refresh', None)
+        if callable(refresh):
+            refresh()
+    except Exception as error:
+        log_runtime('deck browser refresh failed: %s' % type(error).__name__)
 
 
 def choose_study_book(book_id, start=True):
@@ -1702,7 +1718,19 @@ def study_book_menu(tools):
 
 def add_study_dashboard(_browser, content):
     cfg = settings()
-    if mw.col is None or (not cfg.get('review_deadline') and cfg.get('review_plan_mode') != 'daily'):
+    if mw.col is None:
+        return
+    try:
+        from aqt.theme import theme_manager
+        dark = bool(theme_manager.night_mode)
+    except (ImportError, AttributeError):
+        dark = False
+    name = study_book_name(cfg)
+    try:
+        content.stats = home_cta_html(name, dark) + (getattr(content, 'stats', '') or '')
+    except Exception as error:
+        log_runtime('home study button unavailable: %s' % type(error).__name__)
+    if not cfg.get('review_deadline') and cfg.get('review_plan_mode') != 'daily':
         return
     try:
         import datetime
@@ -1729,8 +1757,15 @@ def add_study_dashboard(_browser, content):
 
 
 def open_review_from_toolbar():
-    log_runtime('desktop review toolbar clicked')
+    log_runtime('desktop review button clicked')
     controller.review.show_next(True)
+
+
+def on_webview_message(handled, message, context):
+    if message == 'zvr-start-review':
+        open_review_from_toolbar()
+        return True, None
+    return handled
 
 
 def ensure_anki_connect():
@@ -2137,7 +2172,7 @@ try:
     controller.review.add_word = controller.add_note
     log_runtime("desktop review controller initialized")
     menu_action_ref = menu_action()
-    gui_hooks.top_toolbar_did_init_links.append(add_review_to_toolbar)
+    gui_hooks.webview_did_receive_js_message.append(on_webview_message)
     gui_hooks.card_will_show.append(controller.review.style_card)
     gui_hooks.deck_browser_will_render_content.append(add_study_dashboard)
     gui_hooks.profile_did_open.append(controller.review.start)

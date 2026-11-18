@@ -57,6 +57,17 @@ class StudyDashboardTests(unittest.TestCase):
         full = {today - datetime.timedelta(days=n): 1 for n in range(28)}
         self.assertIn('近 28 天连续 ≥28 天', module.dashboard_html(today, '2026-11-02', plan, full))
 
+    def test_home_cta_is_centred_and_sends_the_start_command(self):
+        content = module.home_cta_html('六级全表')
+        self.assertIn('id="zvr-home-start"', content)
+        self.assertIn("pycmd('zvr-start-review')", content)
+        self.assertIn('六级全表', content)
+        self.assertIn('margin:28px auto', content)
+        self.assertIn('text-align:center', content)
+        escaped = module.home_cta_html('<b>词书</b>')
+        self.assertIn('&lt;b&gt;词书&lt;/b&gt;', escaped)
+        self.assertNotIn('<b>词书</b>', escaped)
+
     def test_countdown_plan_and_theme(self):
         today = datetime.date(2026, 10, 29)
         plan = {'new': 10, 'introduced': 3, 'due': 4, 'done': 5, 'new_remaining': 2}

@@ -3,7 +3,7 @@ base=r'D:\Program Files (x86)\Anki\app_packages';sys.path.insert(0,base)
 os.environ['PATH']=';'.join([os.path.join(base,'PyQt6','Qt6','bin'),os.path.dirname(base),os.path.join(os.environ['SystemRoot'],'System32'),os.environ['SystemRoot']])
 dlls=[os.add_dll_directory(os.path.join(base,'PyQt6','Qt6','bin')),os.add_dll_directory(os.path.dirname(base))];ctypes.WinDLL(os.path.join(os.environ['SystemRoot'],'System32','icuuc.dll'))
 os.environ['QT_QPA_PLATFORM']='offscreen';os.environ['QT_PLUGIN_PATH']=os.path.join(base,'PyQt6','Qt6','plugins')
-from PyQt6.QtWidgets import QApplication,QCheckBox,QComboBox,QDateEdit,QDialog,QDialogButtonBox,QFormLayout,QGroupBox,QHBoxLayout,QLabel,QLineEdit,QPushButton,QRadioButton,QScrollArea,QSpinBox,QTimeEdit,QVBoxLayout,QWidget
+from PyQt6.QtWidgets import QApplication,QCheckBox,QComboBox,QDateEdit,QDialog,QDialogButtonBox,QFormLayout,QGroupBox,QHBoxLayout,QLabel,QLineEdit,QPushButton,QRadioButton,QScrollArea,QSpinBox,QTabWidget,QTimeEdit,QVBoxLayout,QWidget
 from PyQt6.QtCore import QTimer,Qt,QDate,QTime,QObject,pyqtSignal,QEvent,QPoint,QPointF
 import threading
 from PyQt6.QtGui import QFont,QFontDatabase,QPalette,QColor,QWheelEvent
@@ -112,6 +112,11 @@ cfg.update(deck='四六级核心词汇',review_core_enabled=True,review_extra_de
 	review_plan_mode='daily',review_daily_goal=20)
 def inspect_first():
  d=dialog_now()
+ tabs=d.findChild(QTabWidget,'settingsTabs')
+ check(tabs is not None and tabs.count()==4,'settings must be grouped into four tabs, got %s' % (tabs.count() if tabs else None))
+ if tabs is not None:
+  labels=[tabs.tabText(i) for i in range(tabs.count())]
+  check(labels==['常用','复习与词书','学习计划','卡片与朗读'],'unexpected setting tabs: %s' % labels)
  for name in ('reviewBook','reviewScopeTags','reviewExtraDeck','reviewTagsMatch','reviewAllDecks','reviewScopeName','studyBookList'):
   check(d.findChild(QWidget,name) is None,'%s must be gone from the book model' % name)
  check(picker(d) is not None,'the multi-select picker must be on the page')
