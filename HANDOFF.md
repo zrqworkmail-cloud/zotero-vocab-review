@@ -85,7 +85,12 @@ python tools/restart-anki.py --wait 300   # 等到空闲（没有卡片在屏 + 
 
 - **这一轮（§9.50 / §9.51，#65 + #66）：代码完成、闸门全绿。当时记录为「文件未部署」；该说法已过时——2026-11-17 核实已部署并加载，详见上方复核。** 两件事：
   - **#65 分词改造**：用户「去掉机械分块，我希望按照音节分」。做法是**书面音节划分**（不是按发音算、不是词根词缀）。删掉 `morphology.spelling_chunks` 的 4 字母机械兜底，查不到音节来源就 `return None`（不显示分段，绝不显示假分段）。数据三层：随包 2.5 万词表 + 补充文件第 1 段（完整版 Moby Hyphenator II 187,175 条公有领域里挑的 66 词）+ 第 2 段（37 个词典核对词 = 32 个 MW 词头点分 + 5 个写在文件头的派生）。复测：20082 键、词书缺词 104→覆盖 103（`strength` 单音节有意不分）。**MW 抓取只有 `mcp__windows_mcp__Scrape` 能过（WebFetch/curl 都 403），词头中点后带零宽空格 U+200B**；死掉 agent 的核对结果从 jsonl 顶层 `toolUseResult` 抢救（脚本 `tmp/salvage_agent_evidence.py`）。详见 §9.50。
-  - **#66 评分后卡顿**：根因是 `_next_result` 30+ 次串行往返 + `_flip` 的 `ready.wait(0.4)` 超时后**重算一遍**。修法：`_flip` 最多等 15s（死锁阀）绝不重算、预取 `try/finally` 保证 ready 被 set、`_multi` 把独立只读合并成一次 AnkiConnect `multi`（按序返回纯结果，不是 [result,error] 对）。**同一活合集复测：旧 3983ms/35 往返 → 新 ~2960–3200ms/16–17 往返**；`prepare_question` 仍是大头 ~2.4s/11–12 次、尚未完全批量（后续可继续）。「不卡」靠预取把读时藏到看答案那段时间背后，不是消成 0。详见 §9.51。
+  - **#66 评分后卡顿**：根因是 `_next_result` 30+ 次串行往返 + `_flip` 的 `ready.wait(0.4)` 超时后**重算一遍**。修法：`_flip` 最多等 15s（死锁阀）绝不重算、预取 `try/finally` 保证 ready 被 set、`_multi` 把独立只读合并成一次 AnkiConnect `multi`（按序返回纯结果，不是 [result,error] 对）。**同一活合集复测：旧 3983ms/35 往返 → 新 ~2960–3200ms/16–17 往返**；后续批量化实测已把 `prepare_question` 压到冷 **874 ms / 8 次往返**、warm **645 ms / 7 次往返**（见下条）。「不卡」靠预取把读时藏到看答案那段时间背后，不是消成 0。详见 §9.51。
+  - **§9.51 补充：`prepare_question` 冷/热缓存实测（2026-11-18，只读探针，live 账户 `1` / `cet6_full`，各 8 次）**：
+    - 冷缓存：中位数 **874 ms / 8 次往返 / 164 actions**；范围 798–1720 ms、8–9 次往返、163–165 actions；P90 **1035 ms**。
+    - `--warm-captures`：中位数 **645 ms / 7 次往返 / 17 actions**；范围 440–915 ms、6–8 次往返、16–164 actions；P90 **716 ms**。
+    - warm 第 1 次仍是冷启动（**915 ms / 8 次往返 / 164 actions**）；第 2–8 次为 **440–716 ms**，中位数 **642 ms**，每次 **16–17 actions**。
+    - 剩余独立往返主要是 `cardsInfo`（约 103–109 ms）与 `getDeckStats`（约 60–63 ms，仍单独占一个 `multi`）；`findCards` 已合并进少量 `multi`。真实连续会话表现为首卡冷、后续约 **0.64 s**。
   - **闸门**：428 unittest / 26 node / 34/34 离屏 Qt 全绿（`windows-judgment-rows` 在全量里偶发一次 33/34，单跑 3/3 与全量复跑都绿，是计时敏感的旧检查，与本轮无关）。
   - **部署 baseline（历史：verify-state，2026-11-10）**：19/23 文件匹配；DRIFT = `morphology.py` `review_logic.py` `review_popup.py`；`kyle_enrich.py` ABSENT（旧有、从未部署、真题合规未定，别顺手部署）；真机仍跑旧码（插件启动 2026-11-10 09:50:30）。**`verify-state` 部署层只哈希顶层 `*.py`，不查 `lexicon/`——部署后必须手动比对 `syllables_supplement.txt` 哈希，否则假绿。**
   - **当时的接手后第一步（已完成）**：按 §2「部署顺序」：`--apply` 生成完整快照 → `--check` 必须 0 → 拷贝本轮变更（当前是 `morphology.py` `review_logic.py` `review_popup.py` + `lexicon/syllables_supplement.txt`）→ `restart-anki.py --wait 300` → `verify-state.py` 五层 + 手动核词典哈希 + 重启前后计数 unchanged → 真机验收「分词是否合理」「评分后是否还卡」。
