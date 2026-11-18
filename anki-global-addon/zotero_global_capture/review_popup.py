@@ -30,6 +30,7 @@ except ImportError:
 
 from .review_logic import (answer_report, answer_matches, BOOK_LABEL_SOURCES, clean_detail, clean_text, cloze_sentence, collection_plan, EASE_NAMES, end_of_session_reason, example_groups, exam_word_labels, format_meaning, grading_log_line, link_example_html, literature_example_html, masked_example, mask_answer_clues, meaning_table, next_check_delay, plan_limits_new, root_detail_html,
                            next_hint_index, prepare_question, hint_share, book_availability, book_label, book_progress, book_suspended, due_outside_book, entry_view, question_book_label, selected_mode_labels, selection_entries, selection_summary, study_state_label, show_examples, STUDY_STATE_NOTES, meaning_markers, session_batch_size, should_style_card, spelling_hint, letter_hint_label, phonetic_available, pulse_bright, spoken_examples, submit_review, suggested_ease, today_remaining, updated_session_target, window_wait)
+from .review_request import ReviewRequest
 from . import morphology, word_relations, speech, motion_view
 from . import card_motion
 from .card_motion import tier_for
@@ -2387,19 +2388,23 @@ class DesktopReviewController:
         """
         question = dialog.question
         cfg = dict(self.settings())
-        cfg['_review_exclude_card'] = self._current_reviewer_card()
-        cfg['_review_exclude_cards'] = self.session_seen | {question['card_id']}
-        cfg['_review_exclude_words'] = self.session_words | {str(question.get('word', '')).casefold()}
-        cfg['_review_recent_words'] = set(self.recent_words)
-        cfg['_review_group'] = (len(cfg['_review_exclude_cards']), self.session_target)
-        kind_new = question.get('kind') == 'new'
-        cfg['_review_inflight_new'] = 1 if kind_new else 0
-        cfg['_review_inflight_due'] = 0 if kind_new else 1
-        cfg['_review_prefetch'] = True
+        request = ReviewRequest(
+            exclude_card=self._current_reviewer_card(),
+            exclude_cards=frozenset(self.session_seen | {question['card_id']}),
+            exclude_words=frozenset(self.session_words | {str(question.get('word', '')).casefold()}),
+            recent_words=frozenset(self.recent_words),
+            group_position=len(self.session_seen | {question['card_id']}),
+            group_size=self.session_target,
+            inflight_new=1 if question.get('kind') == 'new' else 0,
+            inflight_due=0 if question.get('kind') == 'new' else 1,
+            prefetch=True,
+            capture_lookup_cache=self.capture_lookup_cache,
+        )
+        cfg['_review'] = request
         completed = len(self.session_seen) + 1
         current_target = self.session_target
         generation = self.generation
-        key = (generation, frozenset(cfg['_review_exclude_cards']), current_target)
+        key = (generation, request.exclude_cards, current_target)
         ready = threading.Event()
         self.prefetch_ready = ready
 
@@ -2434,14 +2439,17 @@ class DesktopReviewController:
             self.prefetched = None
             self.prefetch_ready = None
             self.session_target = session_batch_size(cfg)
-        cfg['_review_exclude_card'] = self._current_reviewer_card()
-        cfg['_capture_lookup_cache'] = self.capture_lookup_cache
-        cfg['_review_exclude_cards'] = self.session_seen.copy()
-        cfg['_review_exclude_words'] = self.session_words.copy()
         now = time.monotonic()
         self.recent_words = {word: timestamp for word, timestamp in self.recent_words.items() if now - timestamp < 1800}
-        cfg['_review_recent_words'] = set(self.recent_words)
-        cfg['_review_group'] = (len(cfg['_review_exclude_cards']), self.session_target)
+        cfg['_review'] = ReviewRequest(
+            exclude_card=self._current_reviewer_card(),
+            exclude_cards=frozenset(self.session_seen),
+            exclude_words=frozenset(self.session_words),
+            recent_words=frozenset(self.recent_words),
+            group_position=len(self.session_seen),
+            group_size=self.session_target,
+            capture_lookup_cache=self.capture_lookup_cache,
+        )
         generation = self.generation
         self.busy = True
 
@@ -2457,7 +2465,9 @@ class DesktopReviewController:
                 # Where this card sits in the group, so the mixed new/due order can be
                 # applied per slot (learner 2026-11-06: 每组混排固定比例的旧词). Stamped here
                 # rather than above because `session_target` can still change with the plan.
-                cfg['_review_group'] = (len(cfg['_review_exclude_cards']), self.session_target)
+                request = cfg['_review']
+                request.group_position = len(request.exclude_cards)
+                request.group_size = self.session_target
                 limit_to_due = due_only or (plan is not None and plan['new_remaining'] <= 0 and not manual)
                 question = prepare_question(self.api, cfg, cfg.get('review_mode', 'mixed'), due_only=limit_to_due)
                 reason = None
@@ -2871,29 +2881,34 @@ class DesktopReviewController:
         # the entry again in `_saved`, so a look-back never shows a card Anki never saw.
         dialog.recorded_ease = ease
         self.remember(dialog, ease)
-        collection = mw.col
         cfg = dict(self.settings())
-        cfg['_capture_lookup_cache'] = self.capture_lookup_cache
-        cfg['_review_exclude_card'] = self._current_reviewer_card()
-        cfg['_review_exclude_cards'] = self.session_seen | {dialog.question['card_id']}
-        cfg['_review_exclude_words'] = self.session_words | {dialog.question['word'].casefold()}
-        cfg['_review_recent_words'] = set(self.recent_words)
-        cfg['_review_group'] = (len(cfg['_review_exclude_cards']), self.session_target)
+        request = ReviewRequest(
+            exclude_card=self._current_reviewer_card(),
+            exclude_cards=frozenset(self.session_seen | {dialog.question['card_id']}),
+            exclude_words=frozenset(self.session_words | {dialog.question['word'].casefold()}),
+            recent_words=frozenset(self.recent_words),
+            group_position=len(self.session_seen | {dialog.question['card_id']}),
+            group_size=self.session_target,
+            inflight_new=1 if dialog.question.get('kind') == 'new' else 0,
+            inflight_due=0 if dialog.question.get('kind') == 'new' else 1,
+            capture_lookup_cache=self.capture_lookup_cache,
+        )
+        cfg['_review'] = request
         # The next card is chosen while this rating is still being written, so the
         # deck must be treated as one slot poorer in the queue this card came from.
-        inflight_new = dialog.question.get('kind') == 'new'
-        cfg['_review_inflight_new'] = 1 if inflight_new else 0
-        cfg['_review_inflight_due'] = 0 if inflight_new else 1
         completed = len(self.session_seen) + 1
         current_target = self.session_target
         generation = self.generation
+        elapsed = getattr(dialog, 'answer_seconds', None)
+        if elapsed is None and getattr(dialog, 'shown_at', None) is not None:
+            elapsed = max(0.0, time.monotonic() - dialog.shown_at)
+        elapsed_ms = None if elapsed is None else int(round(elapsed * 1000))
 
         def save():
             """Write the rating on its own thread; the answer is already given."""
             error = None
             try:
-                submit_review(self.api, cfg, dialog.question, ease,
-                              lambda question, rating: self._answer_on_main(collection, generation, question, rating))
+                submit_review(self.api, cfg, dialog.question, ease, elapsed_ms=elapsed_ms)
                 # The recommendation and the press are logged together: the weights behind
                 # 建议评分 were picked, not fitted, and the override rate is the only honest
                 # reading of whether they are too harsh.
@@ -2917,7 +2932,7 @@ class DesktopReviewController:
         window instead of closing it and opening another one a second later.
         """
         def run():
-            key = (generation, frozenset(cfg['_review_exclude_cards']), current_target)
+            key = (generation, cfg['_review'].exclude_cards, current_target)
             ready = self.prefetch_ready
             if self.prefetched is None and ready is not None:
                 # The prefetch started when this card appeared, so it is already partway
@@ -2937,61 +2952,19 @@ class DesktopReviewController:
     def _advance(self, dialog, inflight):
         """Move on to the next card without writing a rating (used by 已掌握)."""
         cfg = dict(self.settings())
-        cfg['_capture_lookup_cache'] = self.capture_lookup_cache
-        cfg['_review_exclude_card'] = self._current_reviewer_card()
-        cfg['_review_exclude_cards'] = self.session_seen | {dialog.question['card_id']}
-        cfg['_review_exclude_words'] = self.session_words | {str(dialog.question.get('word', '')).casefold()}
-        cfg['_review_recent_words'] = set(self.recent_words)
-        cfg['_review_group'] = (len(cfg['_review_exclude_cards']), self.session_target)
-        cfg['_review_inflight_new'] = 1 if inflight and dialog.question.get('kind') == 'new' else 0
-        cfg['_review_inflight_due'] = 1 if inflight and dialog.question.get('kind') != 'new' else 0
+        cfg['_review'] = ReviewRequest(
+            exclude_card=self._current_reviewer_card(),
+            exclude_cards=frozenset(self.session_seen | {dialog.question['card_id']}),
+            exclude_words=frozenset(self.session_words | {str(dialog.question.get('word', '')).casefold()}),
+            recent_words=frozenset(self.recent_words),
+            group_position=len(self.session_seen | {dialog.question['card_id']}),
+            group_size=self.session_target,
+            inflight_new=1 if inflight and dialog.question.get('kind') == 'new' else 0,
+            inflight_due=1 if inflight and dialog.question.get('kind') != 'new' else 0,
+            capture_lookup_cache=self.capture_lookup_cache,
+        )
         threading.Thread(target=self._flip(dialog, cfg, len(self.session_seen) + 1,
                                           self.session_target, self.generation), daemon=True).start()
-
-    def _answer_on_main(self, collection, generation, question, ease):
-        done = threading.Event()
-        cancelled = threading.Event()
-        result = {}
-        def answer():
-            try:
-                # The card may already have been replaced on screen: the rating was
-                # given, so it still has to be written. What must not happen is
-                # answering into a different account or a card that moved, which the
-                # generation, collection and snapshot checks below cover.
-                if cancelled.is_set() or generation != self.generation or mw.col is not collection or mw.state == 'review':
-                    raise ValueError('Anki 账户或复习状态已改变')
-                card = collection.get_card(question['card_id'])
-                if any(getattr(card, key) != value for key, value in question['snapshot'].items()):
-                    raise ValueError('卡片已发生变化')
-                from anki.scheduler.v3 import CardAnswer
-                rating = {1: CardAnswer.AGAIN, 2: CardAnswer.HARD, 3: CardAnswer.GOOD, 4: CardAnswer.EASY}[ease]
-                from anki.errors import InvalidInput
-                def grade():
-                    current = collection.get_card(card.id)
-                    if any(getattr(current, key) != value for key, value in question['snapshot'].items()):
-                        raise ValueError('卡片已发生变化')
-                    states = collection._backend.get_scheduling_states(current.id)
-                    current.start_timer()
-                    native_answer = collection.sched.build_answer(card=current, states=states, rating=rating)
-                    collection.sched.answer_card(native_answer)
-                try:
-                    grade()
-                except InvalidInput as error:
-                    if 'not at top of queue' not in str(error):
-                        raise
-                    grade()
-                result['value'] = [True]
-            except Exception as error:
-                result['error'] = error
-            finally:
-                done.set()
-        mw.taskman.run_on_main(answer)
-        if not done.wait(20):
-            cancelled.set()
-            raise RuntimeError('Anki 主线程未及时响应；请检查评分记录')
-        if 'error' in result:
-            raise result['error']
-        return result['value']
 
     def _saved(self, dialog, generation, error):
         """Silence on success; only a lost rating is news, because the card moved on."""

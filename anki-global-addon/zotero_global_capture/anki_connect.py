@@ -25,10 +25,11 @@ except ImportError:  # standalone test loader
 class AnkiConnectAdapter:
     """Forward collection calls to the existing AnkiConnect ``api`` function."""
 
-    def __init__(self, request: Callable[..., Any]):
+    def __init__(self, request: Callable[..., Any], rpc: Callable[..., Any] | None = None):
         if not callable(request):
             raise TypeError("request must be callable")
         self._request = request
+        self._rpc = rpc if callable(rpc) else None
 
     def __call__(
         self,
@@ -53,8 +54,31 @@ class AnkiConnectAdapter:
     def multi(self, actions: Sequence[Mapping[str, Any]]) -> Any:
         return self("multi", {"actions": list(actions)})
 
-    def answer_card(self, card_id: int, ease: int) -> Any:
-        """Rate one card through the public AnkiConnect action."""
+    def answer_card(self, card_id: int, ease: int, elapsed_ms: int | None = None) -> Any:
+        """Rate one card, preserving the measured review time when possible.
+
+        Legacy ``answerCards`` does not accept an elapsed time, so every such review
+        lands in Anki's revlog as 0 seconds.  The newer JSON-RPC scheduler endpoint
+        does accept ``elapsedMs``.  Use it when a timer was measured, but fall back to
+        the legacy action only *before* any write: a failed answer must never be
+        retried through a second action, or one card could be graded twice.
+        """
+        if elapsed_ms is not None and self._rpc is not None:
+            try:
+                prediction = self._rpc("scheduling.predict", {"cardId": str(card_id)})
+            except Exception:
+                # No mutation happened yet, so the legacy path is still safe.
+                return self("answerCards", {"answers": [{"cardId": card_id, "ease": ease}]})
+            token = (prediction or {}).get("stateToken")
+            if token:
+                rating = ("again", "hard", "good", "easy")[int(ease) - 1]
+                result = self._rpc("scheduling.answer", {
+                    "cardId": str(card_id),
+                    "rating": rating,
+                    "stateToken": token,
+                    "elapsedMs": max(0, int(elapsed_ms)),
+                })
+                return [True] if result and result.get("cardId") else [False]
         return self("answerCards", {"answers": [{"cardId": card_id, "ease": ease}]})
 
     def _find_cards(self, queries: Sequence[str]) -> list[Any]:

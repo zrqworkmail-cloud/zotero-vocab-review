@@ -1036,11 +1036,17 @@ def _multi(api, actions):
     return [api(action, params) for action, params in actions]
 
 
-def _answer_card(api, card_id, ease):
+def _answer_card(api, card_id, ease, elapsed_ms=None):
     """Use the adapter's scheduler port when present; keep the callable test seam."""
     answer = getattr(api, 'answer_card', None)
     if callable(answer):
-        return answer(card_id, ease)
+        if elapsed_ms is None:
+            return answer(card_id, ease)
+        try:
+            return answer(card_id, ease, elapsed_ms=elapsed_ms)
+        except TypeError:
+            # A test seam or an older adapter may only accept the two arguments.
+            return answer(card_id, ease)
     return api('answerCards', {'answers': [{'cardId': card_id, 'ease': ease}]})
 
 
@@ -2079,13 +2085,14 @@ def mark_mastered(api, cfg, question):
     return notes[0] if notes else None
 
 
-def submit_review(api, cfg, question, ease):
-    """Write exactly one rating through AnkiConnect's public answerCards action.
+def submit_review(api, cfg, question, ease, elapsed_ms=None):
+    """Write exactly one rating through AnkiConnect's scheduler port.
 
-    The UI used to pass a callback that called the private scheduler directly.  That
-    made the public path and the in-process path disagree about queue/quota semantics
-    and tied the add-on to Anki's internal scheduler API.  There is now one path: the
-    same action AnkiConnect exposes, after the profile, card snapshot and deck checks.
+    The UI used to pass a callback that called the private scheduler directly.  The
+    adapter now owns the public transport; when a measured ``elapsed_ms`` is supplied
+    it uses AnkiConnect's JSON-RPC scheduler action so Anki's revlog records the real
+    review time instead of the legacy action's hard-coded zero.  Profile, card
+    snapshot and deck checks still run before any write.
     """
     if ease not in (1, 2, 3, 4):
         raise ValueError('无效的复习评分。')
@@ -2107,6 +2114,6 @@ def submit_review(api, cfg, question, ease):
                  int(stats.get('learn_count', 0)) + int(stats.get('review_count', 0)))
     if int(remaining) <= 0:
         raise ValueError('这个牌组今天的复习额度已用完。')
-    result = _answer_card(api, question['card_id'], ease)
+    result = _answer_card(api, question['card_id'], ease, elapsed_ms=elapsed_ms)
     if result != [True]:
         raise ValueError('Anki 没有确认保存评分，请检查 Anki 后再试。')

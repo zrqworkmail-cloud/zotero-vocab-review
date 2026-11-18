@@ -100,8 +100,9 @@ rp.book_progress=lambda *a,**k:(47,481)
 next_card=card(12,'character')
 asked={}
 def fake_prepare(api, config, mode='mixed', rng=None, due_only=False):
-    asked['inflight_new']=config.get('_review_inflight_new')
-    asked['inflight_due']=config.get('_review_inflight_due')
+    request=config.get('_review')
+    asked['inflight_new']=request.inflight_new if request else config.get('_review_inflight_new')
+    asked['inflight_due']=request.inflight_due if request else config.get('_review_inflight_due')
     return dict(next_card)
 rp.prepare_question=fake_prepare
 
@@ -147,7 +148,9 @@ assert any('character' in note for note in notes[before:]),'the message has to n
 #    without another round trip. Each prepare call is tagged by who asked for it.
 prep=[]
 def timed_prepare(api, config, mode='mixed', rng=None, due_only=False):
-    prep.append('prefetch' if config.get('_review_prefetch') else 'flip')
+    request=config.get('_review')
+    prefetch=request.prefetch if request else config.get('_review_prefetch')
+    prep.append('prefetch' if prefetch else 'flip')
     QTest.qWait(200)
     return card(30+ len(prep), 'prefetched')
 rp.prepare_question=timed_prepare
@@ -180,7 +183,9 @@ ctl3.stop();app.processEvents()
 #    (measured 2026-11-10: answer phase <=1 s for 365/381 ratings, prefetch ~3 s).
 prep4=[]
 def slow_prepare(api, config, mode='mixed', rng=None, due_only=False):
-    prep4.append('prefetch' if config.get('_review_prefetch') else 'flip')
+    request=config.get('_review')
+    prefetch=request.prefetch if request else config.get('_review_prefetch')
+    prep4.append('prefetch' if prefetch else 'flip')
     QTest.qWait(700)
     return card(60+len(prep4), 'inflight')
 rp.prepare_question=slow_prepare

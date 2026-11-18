@@ -41,6 +41,35 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(self.calls[-1],
                          ('answerCards', {'answers': [{'cardId': 42, 'ease': 3}]}, {}))
 
+    def test_elapsed_answer_uses_json_rpc_scheduling(self):
+        rpc_calls = []
+
+        def rpc(method, params=None, **kwargs):
+            rpc_calls.append((method, params))
+            if method == 'scheduling.predict':
+                return {'stateToken': 'token-1'}
+            if method == 'scheduling.answer':
+                return {'cardId': '42'}
+            raise AssertionError(method)
+
+        adapter = module.AnkiConnectAdapter(lambda action, params=None, **kwargs: None, rpc=rpc)
+        self.assertEqual(adapter.answer_card(42, 3, elapsed_ms=1250), [True])
+        self.assertEqual([call[0] for call in rpc_calls],
+                         ['scheduling.predict', 'scheduling.answer'])
+        self.assertEqual(rpc_calls[0][1], {'cardId': '42'})
+        self.assertEqual(rpc_calls[1][1], {'cardId': '42', 'rating': 'good',
+                                           'stateToken': 'token-1', 'elapsedMs': 1250})
+
+    def test_a_failed_prediction_falls_back_before_writing(self):
+        def rpc(method, params=None, **kwargs):
+            raise RuntimeError('json-rpc unavailable')
+
+        adapter = module.AnkiConnectAdapter(
+            lambda action, params=None, **kwargs: self.calls.append((action, params, kwargs)), rpc=rpc)
+        self.assertIsNone(adapter.answer_card(42, 3, elapsed_ms=1250))
+        self.assertEqual(self.calls[-1],
+                         ('answerCards', {'answers': [{'cardId': 42, 'ease': 3}]}, {}))
+
     def test_request_alias(self):
         self.adapter.request('getActiveProfile')
         self.assertEqual(self.calls[-1], ('getActiveProfile', {}, {}))

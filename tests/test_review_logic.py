@@ -722,6 +722,15 @@ class ReviewLogicTests(unittest.TestCase):
         logic.submit_review(api, CFG, question, 2)
         self.assertEqual(api.answered[0]['ease'], 2)
 
+    def test_elapsed_review_time_reaches_the_scheduler_port(self):
+        api = FakeAnki()
+        calls = []
+        api.answer_card = lambda card_id, ease, elapsed_ms=None: (
+            calls.append((card_id, ease, elapsed_ms)) or [True])
+        question = logic.prepare_question(api, CFG, 'typing', random.Random(2))
+        logic.submit_review(api, CFG, question, 3, elapsed_ms=1250)
+        self.assertEqual(calls, [(question['card_id'], 3, 1250)])
+
     def test_recent_word_is_deferred_only_when_other_cards_available(self):
         api = FakeAnki()
         cfg = dict(CFG, _review_recent_words={'notion'})

@@ -247,6 +247,28 @@ def api(action, params=None, timeout=15):
             time.sleep(0.2 * attempt)
 
 
+def anki_rpc(method, params=None, timeout=15):
+    """Call AnkiConnect's JSON-RPC endpoint without retrying a write.
+
+    The legacy endpoint cannot carry the measured review time; JSON-RPC can.  A
+    read-only prediction may fail over to the legacy action, but an answer must not
+    be retried after an unknown response: one card, one rating.
+    """
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method,
+                       "params": params or {}}).encode()
+    request = urllib.request.Request(
+        "http://127.0.0.1:8765/api/v1", body,
+        {"Content-Type": "application/json"}, method="POST",
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(request, timeout=timeout) as response:
+        value = json.loads(response.read().decode("utf-8"))
+    if value.get("error"):
+        error = value["error"]
+        raise RuntimeError(error.get("message") if isinstance(error, dict) else error)
+    return value.get("result")
+
+
 def dictionary(word):
     url = "https://dict.youdao.com/jsonapi?q=" + urllib.parse.quote(word) + "&doctype=json&jsonversion=2"
     request = urllib.request.Request(url, headers={"User-Agent": "Zotero-Global-Anki/1.0"})
@@ -554,7 +576,7 @@ class Controller:
         self.bridge.result.connect(self.on_result)
         self.bridge.write_result.connect(self.on_write_result)
         self.bridge.status.connect(lambda text: show_feedback(text, period=5000))
-        self.anki = AnkiConnectAdapter(api)
+        self.anki = AnkiConnectAdapter(api, rpc=anki_rpc)
         self.listener = NativeListener(self.bridge, settings())
         self.listener.start()
         self.pending = None
