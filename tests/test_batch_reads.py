@@ -146,17 +146,20 @@ class PrepareBatching(unittest.TestCase):
                  2: {'cardId': 2, 'modelName': 'Words', 'deckName': 'Literature',
                      'fields': {'Front': {'value': 'method'}, 'Back': {'value': '方法'}}}}
         api = BatchAnki(answers={BASE + ' is:new': [1, 2],
-                                 BASE + ' is:new (tag:anki_global_capture or tag:zotero_vocab_review)': [1]},
+                                 BASE + ' (is:new or is:due -is:new) '
+                                        '(tag:anki_global_capture or tag:zotero_vocab_review)': [1]},
                         stats={'new_count': 2, 'learn_count': 0, 'review_count': 0}, cards=cards)
         question = logic.prepare_question(api, dict(CFG), 'typing', random.Random(1))
         self.assertIsNotNone(question)
         self.assertEqual([action for action, _ in api.calls if action in ('findCards', 'getDeckStats')], [],
                          'stats and the ids/tagged pair must ride batches')
         multis = api.multis()
-        self.assertTrue(any([item['action'] for item in batch['actions']] == ['getDeckStats'] for batch in multis),
-                        multis)
-        self.assertTrue(any([item['action'] for item in batch['actions']] == ['findCards', 'findCards']
-                            for batch in multis), multis)
+        stats_batches = [batch for batch in multis
+                         if [item['action'] for item in batch['actions']][:1] == ['getDeckStats']]
+        self.assertEqual(len(stats_batches), 1, multis)
+        self.assertGreater(len(stats_batches[0]['actions']), 1,
+                           'statistics must share the candidate batch, not stand alone')
+        self.assertTrue(any(item['action'] == 'findCards' for item in stats_batches[0]['actions']), multis)
 
 
 if __name__ == '__main__':

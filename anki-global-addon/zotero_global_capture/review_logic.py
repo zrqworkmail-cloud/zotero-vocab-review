@@ -1798,11 +1798,31 @@ def _question_from(api, cfg, mode, rng, due_only):
     if not decks:
         raise ValueError('这个词书下没有可弹出的卡片，换一个词书试试。')
     deck_cfgs = [dict(cfg, deck=deck) for deck in decks]
-    # One getDeckStats for all resolved decks. A stub (or an older transport) may name only
-    # the first one; ask again for the missing decks rather than failing the card.
+    # Deck statistics and the candidate ids are independent reads, so they travel in one
+    # `multi`. Both queues are searched up front because the slot counts that decide which
+    # queue to use are in that same answer. The availability filter below still skips a
+    # deck whose slot is empty, so this does not ask for cards the user cannot study.
     # One action in a `multi` still goes through `_multi`, so every read in this function
     # degrades the same way on a transport without batching.
-    stats_values = _multi(api, [('getDeckStats', {'decks': decks})])[0] if decks else {}
+    labels = ('due',) if due_only else ('new', 'due')
+    candidate_slots = {}
+    tagged_slots = {}
+    batch_reads = [('getDeckStats', {'decks': decks})]
+    for deck_cfg in deck_cfgs:
+        base_query = _search(deck_cfg)
+        if due_only:
+            tagged_query = collection_queries.capture_tag_query(base_query + ' is:due -is:new')
+        else:
+            tagged_query = collection_queries.capture_tag_query(
+                base_query + ' (is:new or is:due -is:new)')
+        tagged_slots[deck_cfg['deck']] = len(batch_reads)
+        batch_reads.append(('findCards', {'query': tagged_query}))
+        for label in labels:
+            query = collection_queries.plan_query(base_query, label)
+            candidate_slots[(label, deck_cfg['deck'])] = len(batch_reads)
+            batch_reads.append(('findCards', {'query': query}))
+    batch_answers = _multi(api, batch_reads)
+    stats_values = batch_answers[0] if batch_answers else {}
     stats_by_name = {}
     for deck in decks:
         try:
@@ -1815,6 +1835,12 @@ def _question_from(api, cfg, mode, rng, due_only):
                 ('getDeckStats', {'decks': [deck]}) for deck in missing])):
             stats_by_name[deck] = _stats_entry(values, deck)
     stats_by_deck = [stats_by_name[deck] for deck in decks]
+    tagged_by_deck = {deck: set(batch_answers[index] or []) if index < len(batch_answers) else []
+                      for deck, index in tagged_slots.items()}
+    candidate_answers = {}
+    for (label, deck), index in candidate_slots.items():
+        ids = batch_answers[index] if index < len(batch_answers) else []
+        candidate_answers[(label, deck)] = (ids or [], tagged_by_deck[deck])
     card = None
     kind = None
     selected_cfg = None
@@ -1837,11 +1863,15 @@ def _question_from(api, cfg, mode, rng, due_only):
     new_available = sum(max(0, int(stats.get('new_count', 0)) - request.inflight_new)
                         for stats in stats_by_deck)
     first = queue_order(position, size, due_available, new_available, due_only)
+    prefetched_learning = None
     for label in (first, 'new' if first == 'due' else 'due'):
         if label == 'new' and due_only:
             continue
+        if label not in labels:
+            continue
         candidates = []
-        moves = []
+        sampled = []
+        prefetched_learning = None
         for deck_cfg, stats in zip(deck_cfgs, stats_by_deck):
             allowed = (int(stats.get('learn_count', 0)) + int(stats.get('review_count', 0)) if label == 'due'
                        else int(stats.get('new_count', 0)))
@@ -1850,22 +1880,10 @@ def _question_from(api, cfg, mode, rng, due_only):
             allowed -= request.inflight_due if label == 'due' else request.inflight_new
             if allowed <= 0:
                 continue
-            moves.append((deck_cfg, collection_queries.plan_query(_search(deck_cfg), label)))
-        # One request for every deck that still has a slot. The loop below keeps its deck
-        # order, so the random choices (and therefore the cards users see) stay the same;
-        # only the searches that have no randomness moved into a single round trip.
-        reads = []
-        for _deck_cfg, query in moves:
-            reads.extend([
-                ('findCards', {'query': query}),
-                ('findCards', {'query': collection_queries.capture_tag_query(query)})])
-        answers = _multi(api, reads) if reads else []
-        sampled = []
-        for index, (deck_cfg, query) in enumerate(moves):
-            ids = answers[index * 2] or []
-            tagged = set(answers[index * 2 + 1] or [])
+            ids, tagged = candidate_answers.get((label, deck_cfg['deck']), ([], set()))
             if captures and deck_cfg['deck'] != cfg['deck']:
                 cache = request.capture_lookup_cache
+                query = collection_queries.plan_query(_search(deck_cfg), label)
                 matches = cache.get('matching', {}).get(query) if cache is not None else None
                 if matches is None:
                     words = rng.sample(list(captures), min(100, len(captures)))
@@ -1881,10 +1899,24 @@ def _question_from(api, cfg, mode, rng, due_only):
             sample = rng.sample(preferred, min(80, len(preferred))) + rng.sample(others, min(80, len(others)))
             sampled.append((deck_cfg, sample))
         if sampled:
-            # cardsInfo is deck-agnostic: one call covers every deck's sample, and the
-            # eligibility test below still judges each card by its own deck config.
+            # cardsInfo needs the candidate ids, so it cannot share the candidate batch. The
+            # scheduler-state read is independent of which sampled card wins, so it can share
+            # this batch. A new card has no learning state to read; with nothing to pair it
+            # with, a direct cardsInfo call is cheaper than a one-action `multi`.
             wanted = list(dict.fromkeys(cid for _deck_cfg, sample in sampled for cid in sample))
-            infos = api('cardsInfo', {'cards': wanted}) if wanted else []
+            if wanted and kind != 'new':
+                state_query = '(' + ' or '.join('cid:%s' % cid for cid in wanted) + ') is:learn -is:review'
+                answers = _multi(api, [
+                    ('cardsInfo', {'cards': wanted}),
+                    ('findCards', {'query': state_query}),
+                ])
+                if answers is not None and len(answers) == 2:
+                    infos = answers[0] or []
+                    prefetched_learning = set(answers[1] or [])
+                else:
+                    infos = api('cardsInfo', {'cards': wanted}) if wanted else []
+            else:
+                infos = api('cardsInfo', {'cards': wanted}) if wanted else []
             by_id = {item.get('cardId'): item for item in infos or []}
             for deck_cfg, sample in sampled:
                 candidates.extend((by_id[cid], deck_cfg) for cid in sample[:160]
@@ -1945,12 +1977,12 @@ def _question_from(api, cfg, mode, rng, due_only):
     reads = []
     if needs_options:
         reads.append(('findCards', {'query': base}))
-    if kind != 'new':
+    if kind != 'new' and prefetched_learning is None:
         reads.append(('findCards', {'query': collection_queries.card_state_query(card['cardId'])}))
     if reverse_query:
         reads.append(('findCards', {'query': reverse_query}))
     base_ids = prefix_ids = None
-    learning = False
+    learning = card['cardId'] in prefetched_learning if prefetched_learning is not None else False
     answers = None
     if reads:
         try:
@@ -1962,7 +1994,7 @@ def _question_from(api, cfg, mode, rng, due_only):
         if needs_options:
             base_ids = answers[cursor] or []
             cursor += 1
-        if kind != 'new':
+        if kind != 'new' and prefetched_learning is None:
             learning = bool(answers[cursor])
             cursor += 1
         if reverse_query:
@@ -1972,7 +2004,7 @@ def _question_from(api, cfg, mode, rng, due_only):
         # this is the old path, and it is why the batch can never lose a card.
         if needs_options:
             base_ids = api('findCards', {'query': base}) or []
-        if kind != 'new':
+        if kind != 'new' and prefetched_learning is None:
             learning = card_is_learning(api, card['cardId'])
         if reverse_query:
             prefix_ids = api('findCards', {'query': reverse_query}) or []

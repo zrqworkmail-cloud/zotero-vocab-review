@@ -91,6 +91,13 @@ python tools/restart-anki.py --wait 300   # 等到空闲（没有卡片在屏 + 
     - `--warm-captures`：中位数 **645 ms / 7 次往返 / 17 actions**；范围 440–915 ms、6–8 次往返、16–164 actions；P90 **716 ms**。
     - warm 第 1 次仍是冷启动（**915 ms / 8 次往返 / 164 actions**）；第 2–8 次为 **440–716 ms**，中位数 **642 ms**，每次 **16–17 actions**。
     - 剩余独立往返主要是 `cardsInfo`（约 103–109 ms）与 `getDeckStats`（约 60–63 ms，仍单独占一个 `multi`）；`findCards` 已合并进少量 `multi`。真实连续会话表现为首卡冷、后续约 **0.64 s**。
+  - **§9.51 二次优化（2026-11-18，源码未提交、未部署）**：
+    - `getDeckStats` 不再单独发：它和候选 `findCards` 同批；新词/到期两条队列一次取回，采集命中查询按 deck 合并（不再按队列各查一次）。空牌组仍不会被统计查询。
+    - `cardsInfo` 与独立的学习状态查询同批；状态查询覆盖整批候选，选中卡直接查表，不再在选项批里多读一次。`_cards` 的干扰项 `cardsInfo` 仍单独发，因为它依赖 base 采样结果，无法前置到候选批。
+    - 最终热缓存 8 次（`--warm-captures`）：中位 **577 ms / 5 次往返 / 18 actions**，P90 **837 ms**；其中 5 次往返的运行 **462–595 ms**；第 1 次仍是冷启动 1131 ms。连续复测中位数在 392–612 ms 之间浮动，系统负载有波动；未再出现 `getDeckStats` 或初始 `cardsInfo` 单独占往返。
+    - 冷缓存 8 次：中位 **899 ms / 7 次往返 / 166 actions**，P90 **1056 ms**，范围 717–1064 ms。历史记录是 874 ms；同机从 HEAD `5080294` 重跑为冷 **1078 ms / 8 往返**、热 **722 ms / 6.5 往返**，所以热缓存下降明确，冷缓存受采集缓存和机器负载影响，不能单独当作提速证明。
+    - **481 unittest 全绿**；`review_logic.py`、`tests/test_batch_reads.py`、`tests/test_review_logic.py` 仍是工作区改动。probe 读的是仓库源码、live 合集的只读数据。
+    - **真机部署（2026-11-18 11:35–11:42）**：先重建 `dist`（zip 47 项、ankiaddon 48 项；包内 `review_logic.py` 与源码 SHA256 一致）。拷贝前的 `pre-deploy-check --check` 不可能归零：deployed 层必然报本次预期的 `review_logic.py` 差异，且旧备份计数 1241 已过期；因此按工具设计先 `--apply` 刷新回滚点 `pre-deploy-20261118-113925`（48 文件、baseline 1291、fingerprint `4dc1329bf10664b7`），再拷贝 `review_logic.py`（旧/新 SHA256 `EE608DDA…` → `FB5319C0…`）并 `restart-anki --wait 300`。重启 `closed politely in 6.1 s`、AnkiConnect 2 s 后应答、计数 `5211/1291/284/6889` unchanged；随后 `pre-deploy-check --check` exit 0（deployed 45/45 匹配，loaded 11:40:49），`verify-state` 五层：source dirty 7、deployed **46/46**、loaded 真机新码、config 正常、on-screen visible。
   - **闸门**：428 unittest / 26 node / 34/34 离屏 Qt 全绿（`windows-judgment-rows` 在全量里偶发一次 33/34，单跑 3/3 与全量复跑都绿，是计时敏感的旧检查，与本轮无关）。
   - **部署 baseline（历史：verify-state，2026-11-10）**：19/23 文件匹配；DRIFT = `morphology.py` `review_logic.py` `review_popup.py`；`kyle_enrich.py` ABSENT（旧有、从未部署、真题合规未定，别顺手部署）；真机仍跑旧码（插件启动 2026-11-10 09:50:30）。**`verify-state` 部署层只哈希顶层 `*.py`，不查 `lexicon/`——部署后必须手动比对 `syllables_supplement.txt` 哈希，否则假绿。**
   - **当时的接手后第一步（已完成）**：按 §2「部署顺序」：`--apply` 生成完整快照 → `--check` 必须 0 → 拷贝本轮变更（当前是 `morphology.py` `review_logic.py` `review_popup.py` + `lexicon/syllables_supplement.txt`）→ `restart-anki.py --wait 300` → `verify-state.py` 五层 + 手动核词典哈希 + 重启前后计数 unchanged → 真机验收「分词是否合理」「评分后是否还卡」。

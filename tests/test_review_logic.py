@@ -1,6 +1,7 @@
 import importlib.util
 import datetime
 import random
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -39,14 +40,15 @@ class FakeAnki:
         if action == 'findCards':
             q = params['query']
             if 'cid:' in q:
-                cid = int(q.split('cid:')[1].split()[0])
-                if cid not in self.cards:
-                    return []
+                # A state read may cover one candidate or every sampled candidate at once;
+                # Anki's `cid:` clause is an OR, so the fake must answer every id it names.
+                cids = [int(value) for value in re.findall(r'cid:(\d+)', q)]
+                cids = [cid for cid in cids if cid in self.cards]
                 if 'is:learn' in q:
                     # Anki's own way of saying "still in its first steps"; the fake answers it
                     # from the queue column, the way the real scheduler does.
-                    return [cid] if self.cards[cid]['queue'] == 1 else []
-                return [cid]
+                    return [cid for cid in cids if self.cards[cid]['queue'] == 1]
+                return cids
             if 'is:due' in q:
                 return [1] if self.stats['review_count'] else []
             if 'is:new' in q:
@@ -108,8 +110,10 @@ class ReviewLogicTests(unittest.TestCase):
                          ['getActiveProfile', 'deckNames', 'findNotes'])
         stats_batches = [params['actions'] for action, params in api.requests
                          if action == 'multi'
-                         and [item['action'] for item in params['actions']] == ['getDeckStats']]
+                         and any(item['action'] == 'getDeckStats' for item in params['actions'])]
         self.assertEqual(len(stats_batches), 1, 'one statistics request covers every deck')
+        self.assertTrue(any(item['action'] == 'findCards' for item in stats_batches[0]),
+                        'statistics and candidate searches share the batch')
         self.assertEqual([item for item in api.requests if item[0] in ('findCards', 'getDeckStats')], [],
                          'the queue and option searches belong in a multi')
 
