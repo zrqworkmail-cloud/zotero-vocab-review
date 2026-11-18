@@ -72,6 +72,8 @@ python tools/restart-anki.py --wait 300   # 等到空闲（没有卡片在屏 + 
 
 ## 3. 现在的真实状态（2026-11-13；历史基线 2026-11-10，AUDIT §9.11 与 §9.13–§9.51；最新兼容验证见开头）
 
+> **2026-11-17 复核**：#65/#66 的部署已完成；`verify-state` 为 **46/46 文件匹配**安装目录，插件已于 **20:55:34** 加载。下面「文件未部署 / 部署 baseline / 接手后第一步」均为当时的交接记录，不代表当前状态。
+
 ### 26.9.3 兼容验证（2026-11-13，已完成）
 
 - **结论：Anki 26.9.3 兼容边界成立。** 干净 base 为 `...\workspace\anki-compat-26.9.3\base`，profile `User 1`，`ANKI_SINGLE_INSTANCE_KEY=anki-compat-260903`；用 `Tools → Add-ons → Install from file...` 安装 `anki-global-addon\dist\zotero_global_capture.ankiaddon`，Add-ons 列表出现“单词随身复习与全局划词”。启动提示 `26.09.4` 更新时选择 **No**，未升级。
@@ -81,12 +83,12 @@ python tools/restart-anki.py --wait 300   # 等到空闲（没有卡片在屏 + 
 - 收尾：干净实例用 `File → Exit` 退出；活动实例未参与安装、未写入。**当前 `min=max=260903` 仍只声明 26.9.3，未实测版本不冒充兼容。**
 - 详细证据见 `PROJECT_PLUGIN_PROFILE.md` §6。
 
-- **这一轮（§9.50 / §9.51，#65 + #66）：代码完成、闸门全绿、文件未部署。项目正在交接给另一个 agent，所以本轮刻意没部署到用户的活 Anki——部署留作接手后的第一步。** 两件事：
+- **这一轮（§9.50 / §9.51，#65 + #66）：代码完成、闸门全绿。当时记录为「文件未部署」；该说法已过时——2026-11-17 核实已部署并加载，详见上方复核。** 两件事：
   - **#65 分词改造**：用户「去掉机械分块，我希望按照音节分」。做法是**书面音节划分**（不是按发音算、不是词根词缀）。删掉 `morphology.spelling_chunks` 的 4 字母机械兜底，查不到音节来源就 `return None`（不显示分段，绝不显示假分段）。数据三层：随包 2.5 万词表 + 补充文件第 1 段（完整版 Moby Hyphenator II 187,175 条公有领域里挑的 66 词）+ 第 2 段（37 个词典核对词 = 32 个 MW 词头点分 + 5 个写在文件头的派生）。复测：20082 键、词书缺词 104→覆盖 103（`strength` 单音节有意不分）。**MW 抓取只有 `mcp__windows_mcp__Scrape` 能过（WebFetch/curl 都 403），词头中点后带零宽空格 U+200B**；死掉 agent 的核对结果从 jsonl 顶层 `toolUseResult` 抢救（脚本 `tmp/salvage_agent_evidence.py`）。详见 §9.50。
   - **#66 评分后卡顿**：根因是 `_next_result` 30+ 次串行往返 + `_flip` 的 `ready.wait(0.4)` 超时后**重算一遍**。修法：`_flip` 最多等 15s（死锁阀）绝不重算、预取 `try/finally` 保证 ready 被 set、`_multi` 把独立只读合并成一次 AnkiConnect `multi`（按序返回纯结果，不是 [result,error] 对）。**同一活合集复测：旧 3983ms/35 往返 → 新 ~2960–3200ms/16–17 往返**；`prepare_question` 仍是大头 ~2.4s/11–12 次、尚未完全批量（后续可继续）。「不卡」靠预取把读时藏到看答案那段时间背后，不是消成 0。详见 §9.51。
   - **闸门**：428 unittest / 26 node / 34/34 离屏 Qt 全绿（`windows-judgment-rows` 在全量里偶发一次 33/34，单跑 3/3 与全量复跑都绿，是计时敏感的旧检查，与本轮无关）。
-  - **部署 baseline（verify-state，2026-11-10）**：19/23 文件匹配；DRIFT = `morphology.py` `review_logic.py` `review_popup.py`；`kyle_enrich.py` ABSENT（旧有、从未部署、真题合规未定，别顺手部署）；真机仍跑旧码（插件启动 2026-11-10 09:50:30）。**`verify-state` 部署层只哈希顶层 `*.py`，不查 `lexicon/`——部署后必须手动比对 `syllables_supplement.txt` 哈希，否则假绿。**
-  - **接手后第一步**：按 §2「部署顺序」：`--apply` 生成完整快照 → `--check` 必须 0 → 拷贝本轮变更（当前是 `morphology.py` `review_logic.py` `review_popup.py` + `lexicon/syllables_supplement.txt`）→ `restart-anki.py --wait 300` → `verify-state.py` 五层 + 手动核词典哈希 + 重启前后计数 unchanged → 真机验收「分词是否合理」「评分后是否还卡」。
+  - **部署 baseline（历史：verify-state，2026-11-10）**：19/23 文件匹配；DRIFT = `morphology.py` `review_logic.py` `review_popup.py`；`kyle_enrich.py` ABSENT（旧有、从未部署、真题合规未定，别顺手部署）；真机仍跑旧码（插件启动 2026-11-10 09:50:30）。**`verify-state` 部署层只哈希顶层 `*.py`，不查 `lexicon/`——部署后必须手动比对 `syllables_supplement.txt` 哈希，否则假绿。**
+  - **当时的接手后第一步（已完成）**：按 §2「部署顺序」：`--apply` 生成完整快照 → `--check` 必须 0 → 拷贝本轮变更（当前是 `morphology.py` `review_logic.py` `review_popup.py` + `lexicon/syllables_supplement.txt`）→ `restart-anki.py --wait 300` → `verify-state.py` 五层 + 手动核词典哈希 + 重启前后计数 unchanged → 真机验收「分词是否合理」「评分后是否还卡」。
 
 - 这一轮（§9.48）：**「本组结束」不再猜原因，取卡顺序改成今日新词在前，多选词组的引擎落地（设计文档第 1–4 步）**。先量再解释：《六级核心》在架 269 张里 0 新 0 到期，合集另有 38 张到期不在书内——旧文案那句"已选题型下没有可学的卡，可能是牌组当日新词额度已用完"**两个猜测都不成立**，病根是把算出来的 0 用模糊话包装。`end_of_session_reason()` 现为六条各报自己数字的分支（含新的"所选词组已学完 + 合集里另有 N 张到期"）。队列从 `due→new` 换成 `new→due`，**同时必须把内层 `break` 改 `continue`**，否则到期词永远进不了卡。选取模型换成有序条目列表 `{book, tags}`，`tags: []` 读作"整本"，旧单本键自动折成一条（没碰新控件的人学的东西一字不变），指向不存在词书的条目丢弃不猜（§9.4a 的形状）；标签子集用 **OR**（勾第二个标签绝不让词池变小），跨条目片段**必须加显式括号**（反证过：去掉就红）。`prepare_question` 外层按条目循环 + `_selection_index` 盖章 → **顺序接续是引擎自带的**（反证过：缩成 `range(1)` 红三条）。两个自伤值得记住：`review_logic.py` 里一度有**两个同名 `def resolve_book_decks`**，旧版静默覆盖新版，Python 不报错 → 新增 AST 顶层重名检查；`_book_decks_by_book` 曾把缓存写在**调用方的 cfg** 上，两条 plan 测试其实是靠共享 CFG 污染才"通过"的。**新查出来没修的**：那本词书剩下 104 张新词全在 170 张挂起里，而 170 挂起 = 170 `zvr_mastered`（差集两侧都是 0，就是用户自己按 E 的结果），所以"没有未学的新词"只对"在架"成立——该分支要把挂起数报出来，且绝不替用户取消挂起。301 unittest / 26 node / 24/24 离屏 Qt 全绿；11:46:36 部署 `review_logic.py` `review_popup.py`（`pre-deploy-20261105-114636/`）、11:46:43 加载、`closed in 3.9 s`，重启后 269/269/175/6885 **逐项 unchanged: True**。**可见变化只有两条**（那句话现在说真话、新词先于到期）；第 5 步（设置页多行 + 每本勾标签）做完之前，UI 造不出多条目选取。
 
