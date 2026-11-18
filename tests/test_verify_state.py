@@ -37,6 +37,41 @@ class Hashing(unittest.TestCase):
 
 
 class Layers(unittest.TestCase):
+    def test_deployed_layer_checks_domain_and_lexicon_recursively(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source, target = root / 'source', root / 'target'
+            (source / 'domain').mkdir(parents=True)
+            (source / 'lexicon').mkdir()
+            (source / 'domain' / 'models.py').write_text('version = 1\n', encoding='utf-8')
+            (source / 'lexicon' / 'words.txt').write_text('word\n', encoding='utf-8')
+            (source / 'kyle_enrich.py').write_text('private\n', encoding='utf-8')
+            (source / 'user_files').mkdir()
+            (source / 'user_files' / 'private.json').write_text('{}', encoding='utf-8')
+            (source / 'config.json').write_text('{}', encoding='utf-8')
+            (target / 'domain').mkdir(parents=True)
+            (target / 'domain' / 'models.py').write_text('version = 2\n', encoding='utf-8')
+            (target / 'meta.json').write_text('{}', encoding='utf-8')
+            (target / '__init__.py.bak-20261109').write_text('old\n', encoding='utf-8')
+            (target / 'review_logic.py.before-e-removal').write_text('old\n', encoding='utf-8')
+            (target / 'pre-deploy-20261112').mkdir()
+            (target / 'pre-deploy-20261112' / 'review_logic.py').write_text('old\n', encoding='utf-8')
+            old_source, old_installed = module.SRC, module.installed_dir
+            try:
+                module.SRC, module.installed_dir = source, lambda: target
+                lines = module.layer_deployed()
+            finally:
+                module.SRC, module.installed_dir = old_source, old_installed
+            text = '\n'.join(lines)
+            self.assertIn('DRIFT  domain/models.py', text)
+            self.assertIn('ABSENT lexicon/words.txt', text)
+            self.assertNotIn('kyle_enrich.py', text)
+            self.assertNotIn('user_files', text)
+            self.assertNotIn('meta.json', text)
+            self.assertNotIn('.bak-', text)
+            self.assertNotIn('.before-', text)
+            self.assertNotIn('pre-deploy-', text)
+
     def test_every_layer_returns_lines(self):
         for collect in (module.layer_source, module.layer_deployed, module.layer_loaded,
                         module.layer_config, module.layer_onscreen):

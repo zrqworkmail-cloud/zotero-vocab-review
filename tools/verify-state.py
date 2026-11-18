@@ -32,6 +32,11 @@ SRC = REPO / 'anki-global-addon' / 'zotero_global_capture'
 LOG_NAME = 'zotero_global_capture_runtime.log'
 START_MARKERS = ('desktop review controller initialized', 'hotkey registered')
 
+# Source-only modules are deliberately absent from the package; runtime files are
+# produced by Anki or the user. Neither side is evidence of a code drift.
+SOURCE_ONLY = {'kyle_enrich.py', 'kyle_books.py'}
+RUNTIME_ONLY = {'meta.json', 'config.json', 'difficulty.json'}
+
 
 def appdata() -> Path:
     return Path(os.environ['APPDATA'])
@@ -49,6 +54,46 @@ def sha256(path: Path) -> str:
     # Line endings are not a semantic difference for Python, and git's autocrlf
     # checkout can rewrite them under a file that was deployed with cp.
     return hashlib.sha256(path.read_bytes().replace(b'\r\n', b'\n')).hexdigest()[:16]
+
+
+def _generated_backup(relative: Path) -> bool:
+    """Install-dir backups are evidence of an edit, not of package drift.
+
+    The deployment scripts leave ``*.bak-<time>`` / ``*.before-<reason>`` copies and
+    whole ``pre-deploy-<time>/`` snapshots next to the live files.  Counting those as
+    EXTRA made the panel noisy enough to hide a real extra module, and made the
+    loaded-layer timestamp compare against a backup rather than shipped code.
+    """
+    if any(part.startswith('pre-deploy-') for part in relative.parts):
+        return True
+    name = relative.name
+    return any(token in name for token in ('.bak-', '.bak', '.before-', '.before',
+                                           '.orig', '.rej'))
+
+
+def _packaged_files(root: Path) -> list[Path]:
+    """Every file whose content belongs to the add-on, including subpackages.
+
+    The old deployed check only used ``root.glob('*.py')``.  That silently ignored
+    ``domain/`` and ``lexicon/`` after the first modularisation, so a missing or
+    stale subpackage could still be reported as green.  Keep this list in the same
+    shape as the installer: source-only modules and generated files are excluded.
+    """
+    result = []
+    for path in root.rglob('*'):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root)
+        if any(part == '__pycache__' for part in relative.parts):
+            continue
+        if _generated_backup(relative):
+            continue
+        if path.suffix == '.pyc' or relative.parts[0] == 'user_files':
+            continue
+        if relative.name in SOURCE_ONLY or relative.name in RUNTIME_ONLY:
+            continue
+        result.append(relative)
+    return sorted(result, key=lambda item: item.as_posix())
 
 
 def run(*cmd: str) -> str:
@@ -81,23 +126,27 @@ def layer_deployed() -> list:
     target = installed_dir()
     if not target.is_dir():
         return ['NOT INSTALLED: %s does not exist' % target]
-    source_files = sorted(SRC.glob('*.py'))
+    source_files = _packaged_files(SRC)
     lines, drifted, absent = [], [], []
-    for path in source_files:
-        other = target / path.name
+    for relative in source_files:
+        other = target / relative
+        name = relative.as_posix()
         if not other.exists():
-            absent.append(path.name)
-        elif sha256(path) != sha256(other):
-            drifted.append(path.name)
-    extra = sorted(p.name for p in target.glob('*.py') if p.name not in {p.name for p in source_files})
-    lines.append('%d of %d files match the install dir' % (len(source_files) - len(drifted) - len(absent), len(source_files)))
+            absent.append(name)
+        elif sha256(SRC / relative) != sha256(other):
+            drifted.append(name)
+    source_names = {item.as_posix() for item in source_files}
+    extra = sorted(item.as_posix() for item in _packaged_files(target)
+                   if item.as_posix() not in source_names)
+    lines.append('%d of %d files match the install dir' %
+                 (len(source_files) - len(drifted) - len(absent), len(source_files)))
     for name in drifted:
         lines.append('  DRIFT  %s (branch and installed differ)' % name)
     for name in absent:
         lines.append('  ABSENT %s (never deployed)' % name)
     for name in extra:
         lines.append('  EXTRA  %s (installed only)' % name)
-    newest = max((p.stat().st_mtime for p in target.glob('*.py')), default=0)
+    newest = max(((target / item).stat().st_mtime for item in _packaged_files(target)), default=0)
     if newest:
         lines.append('  newest installed file: %s' % datetime.fromtimestamp(newest).strftime('%Y-%m-%d %H:%M:%S'))
     return lines
@@ -141,7 +190,8 @@ def layer_loaded() -> list:
         if match and any(marker in line for marker in START_MARKERS):
             stamps.append(datetime.strptime(match.group(1), '%Y-%m-%d %H:%M:%S'))
     target = installed_dir()
-    newest = max((datetime.fromtimestamp(p.stat().st_mtime) for p in target.glob('*.py')), default=None)
+    newest = max((datetime.fromtimestamp((target / item).stat().st_mtime)
+                  for item in _packaged_files(target)), default=None)
     if not stamps:
         lines.append('add-on start: no startup line in the log yet')
     elif newest is None:
