@@ -8,6 +8,7 @@ so a change to the batching can be judged by the same number the learner feels.
     python tools/probe-prepare-question.py --runs 8
     python tools/probe-prepare-question.py --runs 8 --warm-captures
     python tools/probe-prepare-question.py --book cet6_full --mode mixed
+    python tools/probe-prepare-question.py --module "$APPDATA/Anki2/addons21/zotero_global_capture/review_logic.py" --runs 8 --warm-captures
 
 Only AnkiConnect reads are allowed here (findCards/cardsInfo/getDeckStats/deckNames/
 getActiveProfile/findNotes/notesInfo). A write action raises instead of silently changing the
@@ -19,6 +20,7 @@ exclusions are set the way `_flip` sets them for the card after a rating.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -37,11 +39,15 @@ READ_ACTIONS = {
 }
 
 
-def load_logic():
-    spec = importlib.util.spec_from_file_location('review_logic_probe', MODULE)
+def load_logic(path=MODULE):
+    spec = importlib.util.spec_from_file_location('review_logic_probe', path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def module_hash(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
 
 
 def live_config(path: Path):
@@ -138,10 +144,16 @@ def main(argv=None):
                         help='reuse one capture cache for every run (what a session sees)')
     parser.add_argument('--config', default=str(Path(os.environ.get('APPDATA', Path.home() / 'AppData/Roaming'))
                                                  / 'Anki2' / 'addons21' / 'zotero_global_capture' / 'meta.json'))
+    parser.add_argument('--module', type=Path, default=MODULE,
+                        help='review_logic.py to load (default: repository source); point this at addons21 to measure the deployed code')
     args = parser.parse_args(argv)
+    module_path = args.module.expanduser().resolve()
+    if not module_path.is_file():
+        parser.error('--module is not a file: %s' % module_path)
 
-    logic = load_logic()
+    logic = load_logic(module_path)
     api = Counter()
+    print('module: %s  sha256: %s' % (module_path, module_hash(module_path)))
     config = live_config(Path(args.config))
     if args.book:
         config['study_book'] = args.book
