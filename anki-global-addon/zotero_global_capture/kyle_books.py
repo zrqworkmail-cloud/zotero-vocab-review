@@ -1,9 +1,10 @@
 """Import locally supplied KyleBing books without replacing existing notes."""
-import html
 import json
 from pathlib import Path
 
+from .domain.models import NoteDraft
 from .review_logic import clean_text
+from .vocabulary import add_notes, note_values
 
 BOOKS = {'cet4_kyle': ('四级-完整.jsonl', 'zvr_kyle_cet4'),
          'cet6_kyle': ('六级-完整.jsonl', 'zvr_kyle_cet6')}
@@ -25,24 +26,34 @@ def read_books(directory):
     return entries
 
 
-def new_fields(entry, cfg, fields):
+def new_draft(entry, cfg, fields):
     content = entry['content']
     meaning = '\n'.join((str(t.get('pos', '')).strip() + '. ' if t.get('pos') else '') + str(t.get('tranCn', '')).strip()
                         for t in content.get('trans', []) if t.get('tranCn'))
     if not meaning:
         return None
-    encode = lambda x: html.escape(str(x)).replace('\n', '<br>')
-    values = {cfg['front_field']: encode(entry['word']), cfg['back_field']: encode(meaning)}
+    optional = {}
     if '音标' in fields:
-        values['音标'] = encode(content.get('ukphone') or content.get('usphone') or content.get('phone') or '')
+        optional['音标'] = content.get('ukphone') or content.get('usphone') or content.get('phone') or ''
     if '例句' in fields:
         examples = content.get('sentence', {}).get('sentences', [])
-        values['例句'] = '<br>'.join(encode(s.get('sContent', '')) + ('<br>' + encode(s['sCn']) if s.get('sCn') else '')
-                                    for s in examples if s.get('sContent'))
+        optional['例句'] = '\n'.join(
+            str(s.get('sContent', '')) + ('\n' + str(s['sCn']) if s.get('sCn') else '')
+            for s in examples if s.get('sContent'))
     if '近义词' in fields:
         synos = content.get('syno', {}).get('synos', [])
-        values['近义词'] = encode(', '.join(dict.fromkeys(w['w'] for s in synos for w in s.get('hwds', []) if w.get('w'))))
-    return values
+        optional['近义词'] = ', '.join(dict.fromkeys(
+            w['w'] for s in synos for w in s.get('hwds', []) if w.get('w')))
+    return NoteDraft(front=entry['word'], back=meaning, fields=optional,
+                     tags=tuple(sorted(entry.get('tags', ()))),
+                     deck='四六级词汇（KyleBing补充）', model=cfg.get('model', ''),
+                     source='kyle')
+
+
+def new_fields(entry, cfg, fields):
+    """Compatibility wrapper for callers that still need the escaped field map."""
+    draft = new_draft(entry, cfg, fields)
+    return note_values(draft, cfg, fields) if draft is not None else None
 
 
 def import_books(api, cfg, directory, journal):
@@ -60,7 +71,7 @@ def import_books(api, cfg, directory, journal):
             if key:
                 existing.setdefault(key, []).append(note)
     to_tag = {tag: [] for _, tag in BOOKS.values()}
-    new = []
+    drafts = []
     result = {'unique': len(entries), 'reused': 0, 'added': 0, 'failed': [], 'tagged': {tag: 0 for tag in to_tag}}
     def check():
         if api('getActiveProfile', {}) != profile:
@@ -73,12 +84,11 @@ def import_books(api, cfg, directory, journal):
                 if tag not in note.get('tags', []):
                     to_tag[tag].append(note)
         else:
-            values = new_fields(entry, cfg, fields)
-            if values is None:
+            draft = new_draft(entry, cfg, fields)
+            if draft is None:
                 result['failed'].append(entry['word'])
                 continue
-            new.append({'deckName': '四六级词汇（KyleBing补充）', 'modelName': cfg['model'], 'fields': values,
-                        'options': {'allowDuplicate': False}, 'tags': sorted(entry['tags'])})
+            drafts.append(draft)
     journal = Path(journal)
     journal.parent.mkdir(parents=True, exist_ok=True)
     with journal.open('a', encoding='utf-8') as log:
@@ -89,19 +99,19 @@ def import_books(api, cfg, directory, journal):
                 log.write(json.dumps({'action': 'addTags', 'tag': tag, 'notes': [{'id': n['noteId'], 'tags': n.get('tags', [])} for n in batch]}, ensure_ascii=False) + '\n'); log.flush()
                 api('addTags', {'notes': [n['noteId'] for n in batch], 'tags': tag})
                 result['tagged'][tag] += len(batch)
-        if new:
+        if drafts:
             check()
             api('createDeck', {'deck': '四六级词汇（KyleBing补充）'})
-        for i in range(0, len(new), 50):
+        for i in range(0, len(drafts), 50):
             check()
-            batch = new[i:i + 50]
-            ids = api('addNotes', {'notes': batch})
+            batch = drafts[i:i + 50]
+            ids = add_notes(api, batch, cfg, fields)
             if not isinstance(ids, list) or len(ids) != len(batch):
                 raise RuntimeError('Anki 未返回完整导入结果，请检查后重试。')
             log.write(json.dumps({'action': 'addNotes', 'ids': [x for x in ids if x]}, ensure_ascii=False) + '\n'); log.flush()
-            for note, nid in zip(batch, ids):
+            for draft, nid in zip(batch, ids):
                 if nid:
                     result['added'] += 1
                 else:
-                    result['failed'].append(note['fields'][cfg['front_field']])
+                    result['failed'].append(draft.front)
     return result

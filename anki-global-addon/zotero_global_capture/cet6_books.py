@@ -1,9 +1,10 @@
 """CET-6 book membership reuses existing notes and preserves their schedules."""
-import html
 import json
 from pathlib import Path
 
+from .domain.models import NoteDraft
 from .review_logic import clean_text, unambiguous_lemma
+from .vocabulary import add_notes
 
 ROOT = Path(__file__).parent / 'lexicon'
 FULL_TAG = 'zvr_cet6_full'
@@ -60,7 +61,7 @@ def setup_books(api, cfg, lookup=None):
             api('addTags', {'notes': ids_to_tag[i:i + 200], 'tags': tag})
 
     missing = full_words - set(existing)
-    new_notes = []
+    drafts = []
     for word in sorted(missing):
         row = full_rows.get(word)
         info = core.get('dictionary', {}).get(word, {})
@@ -77,25 +78,24 @@ def setup_books(api, cfg, lookup=None):
         if not meaning:
             counts['failed'].append(word)
             continue
-        values = {cfg['front_field']: html.escape(display), cfg['back_field']: html.escape(meaning).replace('\n', '<br>')}
-        if '音标' in fields and phonetic:
-            values['音标'] = html.escape(phonetic)
         tags = [FULL_TAG] + ([CORE_TAG] if word in core_words else [])
-        new_notes.append({'deckName': '六级词汇（补充）', 'modelName': cfg['model'], 'fields': values,
-                          'options': {'allowDuplicate': False}, 'tags': tags})
-    if new_notes:
+        drafts.append(NoteDraft(front=display, back=meaning,
+                                fields={'音标': phonetic}, tags=tuple(tags),
+                                deck='六级词汇（补充）', model=cfg['model'],
+                                source='cet6_full'))
+    if drafts:
         check_profile()
         api('createDeck', {'deck': '六级词汇（补充）'})
-    for i in range(0, len(new_notes), 50):
+    for i in range(0, len(drafts), 50):
         check_profile()
-        batch = new_notes[i:i + 50]
-        results = api('addNotes', {'notes': batch})
+        batch = drafts[i:i + 50]
+        results = add_notes(api, batch, cfg, fields)
         if not isinstance(results, list) or len(results) != len(batch):
             raise RuntimeError('Anki 未返回完整导入结果；可再次整理以补齐。')
-        for note, result in zip(batch, results):
+        for draft, result in zip(batch, results):
             if result:
                 counts['added'] += 1
                 counts['added_note_ids'].append(result)
             else:
-                counts['failed'].append(note['fields'][cfg['front_field']])
+                counts['failed'].append(draft.front)
     return counts

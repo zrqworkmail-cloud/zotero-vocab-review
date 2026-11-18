@@ -1,9 +1,10 @@
 """Add missing community core words without changing existing cards or schedules."""
-import html
 import json
 from pathlib import Path
 
+from .domain.models import NoteDraft
 from .review_logic import clean_text, unambiguous_lemma
+from .vocabulary import add_note
 
 DECK = '四六级核心词汇'
 
@@ -45,15 +46,15 @@ def import_missing(api, cfg, lookup):
         if not deck_ready:
             api('createDeck', {'deck': DECK})
             deck_ready = True
-        values = {cfg['front_field']: html.escape(word), cfg['back_field']: html.escape(info['meaning']).replace('\n', '<br>')}
-        if '音标' in fields and info.get('phonetic'):
-            values['音标'] = html.escape(info['phonetic'])
-        note = {'deckName': DECK, 'modelName': cfg['model'], 'fields': values,
-                'options': {'allowDuplicate': False}, 'tags': ['zvr_cet6_core']}
+        optional = {'音标': info.get('phonetic', '')}
+        tags = ['zvr_cet6_core']
         if word in core['cet4_overlap']:
-            note['tags'].append('zvr_cet4_core')
+            tags.append('zvr_cet4_core')
+        draft = NoteDraft(front=word, back=info['meaning'], fields=optional,
+                          tags=tuple(tags), deck=DECK, model=cfg['model'],
+                          source='cet6_core')
         try:
-            if api('addNote', {'note': note}):
+            if add_note(api, draft, cfg, fields):
                 added += 1
             else:
                 failed.append(word)
