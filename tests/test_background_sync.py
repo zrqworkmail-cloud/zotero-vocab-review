@@ -20,8 +20,9 @@ spec = importlib.util.spec_from_file_location('review_logic_sync', source.parent
 logic = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(logic)
 
-WANTED = ('run_background_sync', 'start_sync_timer', 'pause_background_sync',
-          'end_background_sync', 'short_sync_reason', 'sync_is_logged_in')
+WANTED = ('run_background_sync', 'run_silent_sync', '_silent_sync_done', '_silent_sync_failed',
+          'start_sync_timer', 'pause_background_sync', 'end_background_sync',
+          'short_sync_reason', 'sync_is_logged_in')
 
 
 class FakeTimer:
@@ -45,13 +46,13 @@ class FakeQTimer:
         FakeQTimer.shots.append((ms, callback))
 
 
-def build(cfg=None, dispatch_error=None, idle=True, auth=True):
+def build(cfg=None, dispatch_error=None, idle=True, auth=True, silent=False):
     """The sync wiring pulled out of __init__.py, run against a stubbed Anki."""
     FakeQTimer.shots = []
     dialogs = []
     handler = lambda mw, err: dialogs.append(err)          # Anki's modal error box
     sync_module = types.SimpleNamespace(handle_sync_error=handler)
-    notices, notes, started = [], [], []
+    notices, notes, started, task_calls = [], [], [], []
     timer = FakeTimer()
 
     def dispatch():
@@ -59,17 +60,33 @@ def build(cfg=None, dispatch_error=None, idle=True, auth=True):
             raise dispatch_error
         started.append(True)
 
-    mw = types.SimpleNamespace(zvr_closing=False,
-                               pm=types.SimpleNamespace(sync_auth=lambda: auth or None),
+    class FakeTaskman:
+        def run_in_background(self, task, on_done=None, uses_collection=True):
+            task_calls.append((task, on_done, uses_collection))
+
+    pm = types.SimpleNamespace(sync_auth=lambda: auth or None,
+                               media_syncing_enabled=lambda: False,
+                               set_host_number=lambda value: None,
+                               set_current_sync_url=lambda value: None,
+                               clear_sync_auth=lambda: None)
+    mw = types.SimpleNamespace(zvr_closing=False, pm=pm, taskman=FakeTaskman(),
+                               state='deckBrowser', reset=lambda: None,
+                               toolbar=types.SimpleNamespace(redraw=lambda: None),
+                               media_syncer=types.SimpleNamespace(
+                                   start_monitoring=lambda **kwargs: None),
                                on_sync_button_clicked=dispatch)
+    mw.col = types.SimpleNamespace(_load_scheduler=lambda: None,
+                                   models=types.SimpleNamespace(_clear_cache=lambda: None))
     controller = types.SimpleNamespace(sync_timer=timer)
     scope = {'datetime': datetime, 're': re, 'QTimer': FakeQTimer, 'mw': mw, 'controller': controller,
-             'settings': lambda: dict({'sync_background': True, 'sync_background_minutes': 5}, **(cfg or {})),
+             'settings': lambda: dict({'sync_background': True, 'sync_silent': silent,
+                                       'sync_background_minutes': 5}, **(cfg or {})),
              'study_is_idle': lambda: idle, 'sync_due': logic.sync_due,
              'install_sync_error_guard': logic.install_sync_error_guard,
              'aqt_sync_module': lambda: sync_module, 'sync_state': {'last': None, 'running': False,
                                                                     'guard': None, 'error': None},
-             'log_runtime': notes.append, 'show_feedback': lambda message, **kw: notices.append(message)}
+             'log_runtime': notes.append, 'show_feedback': lambda message, **kw: notices.append(message),
+             'task_calls': task_calls}
     tree = ast.parse(source.read_text(encoding='utf-8'))
     # exec'd into one dict, so the helpers reach each other the way they do in the add-on
     for name in WANTED:
@@ -77,6 +94,51 @@ def build(cfg=None, dispatch_error=None, idle=True, auth=True):
         exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), 'exec'), scope)
     sync_module.original_box = handler
     return scope, mw, timer, sync_module, dialogs, notices, notes, started
+
+
+class SilentSync(unittest.TestCase):
+    def test_silent_sync_bypasses_the_sync_button_and_progress_dialog(self):
+        scope, mw, timer, sync_module, dialogs, notices, notes, started = build(silent=True)
+        scope['run_background_sync']()
+        self.assertEqual(started, [], 'silent sync must not call on_sync_button_clicked')
+        self.assertEqual(len(scope['task_calls']), 1, 'one background task should be queued')
+        task, on_done, uses_collection = scope['task_calls'][0]
+        self.assertTrue(uses_collection)
+        out = types.SimpleNamespace(required=0, NO_CHANGES=0, host_number=1,
+                                    new_endpoint=None, server_message='')
+        mw.col.sync_collection = lambda auth, media: out
+        task()
+        future = types.SimpleNamespace()
+        future.result = lambda: out
+        on_done(future)
+        self.assertFalse(scope['sync_state']['running'])
+        self.assertEqual(timer.stopped, [])
+        self.assertEqual(notices, [])
+        self.assertIn('background sync complete', notes)
+
+    def test_a_full_sync_is_handed_back_to_the_user_not_chosen_silently(self):
+        scope, mw, timer, sync_module, dialogs, notices, notes, started = build(silent=True)
+        scope['run_background_sync']()
+        out = types.SimpleNamespace(required=1, NO_CHANGES=0, host_number=1,
+                                    new_endpoint=None, server_message='')
+        on_done = scope['task_calls'][0][1]
+        future = types.SimpleNamespace()
+        future.result = lambda: out
+        on_done(future)
+        self.assertFalse(scope['sync_state']['running'])
+        self.assertEqual(timer.stopped, [True])
+        self.assertIn('完整同步', notices[0])
+
+    def test_a_silent_sync_failure_is_a_toast_not_a_modal(self):
+        scope, mw, timer, sync_module, dialogs, notices, notes, started = build(silent=True)
+        scope['run_background_sync']()
+        on_done = scope['task_calls'][0][1]
+        future = types.SimpleNamespace()
+        future.result = lambda: (_ for _ in ()).throw(RuntimeError('down'))
+        on_done(future)
+        self.assertEqual(dialogs, [])
+        self.assertEqual(timer.stopped, [True])
+        self.assertIn('down', notices[0])
 
 
 class IdleSync(unittest.TestCase):

@@ -8,6 +8,7 @@ import html
 import json
 import os
 import re
+import sys
 import tempfile
 import threading
 import time
@@ -58,6 +59,7 @@ DEFAULTS = {
     "review_pin": True,
     "hide_main_on_close": True,
     "sync_background": True,
+    "sync_silent": True,
     "sync_background_minutes": 5,
     "anki_auto_sync_remembered": None,
     "review_smart": True,
@@ -132,6 +134,43 @@ def log_runtime(event):
                 log_file.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), event))
     except Exception:
         pass
+
+
+def _log_uncaught(kind, value, tb):
+    """Put the traceback Anki is about to show into our own log as well.
+
+    On 2026-11-19 the add-on error dialog ("相关插件: zotero_global_capture") arrived with no
+    text at all: Anki builds that dialog from the traceback and keeps no copy, so the reason
+    died with the process. Chaining the hook leaves Anki's dialog exactly as it was and
+    records the traceback here, where it can be read afterwards.
+    """
+    try:
+        log_runtime("uncaught %s: %s\n%s" % (
+            getattr(kind, '__name__', kind), value,
+            ''.join(traceback.format_exception(kind, value, tb))))
+    except Exception:
+        pass
+
+
+def _install_uncaught_logging():
+    previous = sys.excepthook
+    if getattr(previous, '_zvr_logging', False):
+        return
+    def hook(kind, value, tb):
+        _log_uncaught(kind, value, tb)
+        previous(kind, value, tb)
+    hook._zvr_logging = True
+    sys.excepthook = hook
+    thread_hook = getattr(threading, 'excepthook', None)
+    if thread_hook is not None and not getattr(thread_hook, '_zvr_logging', False):
+        def thread_logging(args):
+            _log_uncaught(args.exc_type, args.exc_value, args.exc_traceback)
+            thread_hook(args)
+        thread_logging._zvr_logging = True
+        threading.excepthook = thread_logging
+
+
+_install_uncaught_logging()
 
 
 def settings():
@@ -927,9 +966,15 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     hide_main = QCheckBox('点主窗口关闭按钮时只隐藏，不退出 Anki')
     hide_main.setObjectName('hideMainOnClose')
     hide_main.setChecked(bool(cfg.get('hide_main_on_close', True)))
-    sync_back = QCheckBox('后台静默同步（不再在打开和关闭 Anki 时等待同步）')
+    sync_back = QCheckBox('后台自动同步（不在打开和关闭 Anki 时等待同步）')
     sync_back.setObjectName('syncBackground')
     sync_back.setChecked(bool(cfg.get('sync_background', True)))
+    sync_silent = QCheckBox('静默同步（不弹出“正在同步”窗口）')
+    sync_silent.setObjectName('syncSilent')
+    sync_silent.setChecked(bool(cfg.get('sync_silent', True)))
+    sync_silent.setToolTip('开启后，后台同步在后台任务里完成，不显示 Anki 的同步进度窗口。')
+    sync_back.toggled.connect(sync_silent.setEnabled)
+    sync_silent.setEnabled(sync_back.isChecked())
     sync_minutes = QSpinBox()
     sync_minutes.setObjectName('syncBackgroundMinutes')
     sync_minutes.setRange(1, 120)
@@ -1162,6 +1207,7 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
     form.addRow("随身复习", review_enabled)
     form.addRow("关闭主窗口", hide_main)
     form.addRow("后台同步", sync_back)
+    form.addRow("静默同步", sync_silent)
     form.addRow("同步间隔", sync_minutes)
     form.addRow("弹出间隔", review_interval)
     form.addRow("记忆复习", review_smart)
@@ -1377,6 +1423,7 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
                 "review_enabled": review_enabled.isChecked(),
                 "hide_main_on_close": hide_main.isChecked(),
                 "sync_background": sync_back.isChecked(),
+                "sync_silent": sync_silent.isChecked(),
                 "sync_background_minutes": sync_minutes.value(),
                 "review_interval_minutes": review_interval.value(),
                 "review_batch_size": review_batch.value(),
@@ -2109,6 +2156,111 @@ def study_is_idle():
         return not sync_state["running"]
 
 
+def _silent_sync_failed(error):
+    """Report a background sync failure without opening Anki's modal error box."""
+    if getattr(mw, "zvr_closing", False):
+        end_background_sync()
+        return
+    interrupted = False
+    auth_error = False
+    try:
+        from anki.errors import Interrupted, SyncError, SyncErrorKind
+        interrupted = isinstance(error, Interrupted)
+        auth_error = isinstance(error, SyncError) and error.kind is SyncErrorKind.AUTH
+    except Exception:
+        pass
+    if auth_error:
+        try:
+            mw.pm.clear_sync_auth()
+        except Exception:
+            pass
+    if interrupted:
+        end_background_sync()
+        log_runtime("background sync interrupted")
+        return
+    sync_state["error"] = "%s: %s" % (type(error).__name__, error)
+    log_runtime("background sync failed: %s" % type(error).__name__)
+    pause_background_sync(short_sync_reason(sync_state["error"]))
+
+
+def _silent_sync_done(future):
+    """Finish a silent sync, keeping full-sync decisions out of the background path."""
+    try:
+        out = future.result()
+    except Exception as error:
+        _silent_sync_failed(error)
+        return
+    if getattr(mw, "zvr_closing", False):
+        end_background_sync()
+        return
+    try:
+        mw.col._load_scheduler()
+    except Exception as error:
+        log_runtime("scheduler reload after sync failed: %s" % type(error).__name__)
+    try:
+        host_number = getattr(out, "host_number", None)
+        if host_number is not None:
+            mw.pm.set_host_number(host_number)
+        endpoint = getattr(out, "new_endpoint", None)
+        if endpoint:
+            mw.pm.set_current_sync_url(endpoint)
+    except Exception as error:
+        log_runtime("sync endpoint update failed: %s" % type(error).__name__)
+    message = str(getattr(out, "server_message", "") or "").strip()
+    if message:
+        show_feedback(message[:240], period=9000)
+    if getattr(out, "required", getattr(out, "NO_CHANGES", 0)) != getattr(out, "NO_CHANGES", 0):
+        # A full upload/download needs the learner's decision; never choose one silently.
+        log_runtime("background sync needs manual full sync")
+        pause_background_sync("需要在 Anki 中手动完成完整同步")
+        return
+    try:
+        # Match Anki's after-sync refresh without opening a window. Since the timer only
+        # runs while no card is up, this cannot interrupt a review.
+        mw.col.models._clear_cache()
+        if getattr(mw, "state", "") in ("deckBrowser", "overview"):
+            mw.reset()
+        mw.toolbar.redraw()
+    except Exception as error:
+        log_runtime("silent sync refresh failed: %s" % type(error).__name__)
+    try:
+        # is_periodic_sync suppresses media-sync error dialogs as well.
+        mw.media_syncer.start_monitoring(is_periodic_sync=True)
+    except TypeError:
+        try:
+            mw.media_syncer.start_monitoring()
+        except Exception as error:
+            log_runtime("media sync monitor failed: %s" % type(error).__name__)
+    except Exception as error:
+        log_runtime("media sync monitor failed: %s" % type(error).__name__)
+    log_runtime("background sync complete")
+    end_background_sync()
+
+
+def run_silent_sync():
+    """Run Anki's collection sync on a worker, bypassing its progress dialog."""
+    try:
+        auth = mw.pm.sync_auth()
+    except Exception as error:
+        _silent_sync_failed(error)
+        return False
+    if not auth:
+        end_background_sync()
+        log_runtime("background sync waiting for a sync login")
+        return False
+    try:
+        media = bool(mw.pm.media_syncing_enabled())
+        mw.taskman.run_in_background(
+            lambda: mw.col.sync_collection(auth, media),
+            _silent_sync_done,
+            uses_collection=True,
+        )
+    except Exception as error:
+        _silent_sync_failed(error)
+        return False
+    return True
+
+
 def run_background_sync():
     """Sync in a quiet moment, so opening and closing Anki costs nothing."""
     if getattr(mw, "zvr_closing", False):
@@ -2125,12 +2277,15 @@ def run_background_sync():
     sync_state["last"] = now
     sync_state["running"] = True
     sync_state["error"] = None
+    if cfg.get("sync_silent", True):
+        if run_silent_sync():
+            log_runtime("background sync started (silent)")
+        return
+    # Legacy path, kept for the switch-off case: Anki's own sync button opens its
+    # progress window and asks about a full sync. The error box is still silenced.
     sync_state["guard"] = install_sync_error_guard(aqt_sync_module(), sync_state, pause_background_sync)
     log_runtime("background sync started")
     try:
-        # Anki's own sync path, on the main thread: it runs the work in a background task,
-        # refreshes afterwards, and still asks the user if a full sync is really needed.
-        # The only thing changed is where a failure goes — see install_sync_error_guard.
         mw.on_sync_button_clicked()
     except Exception as error:
         log_runtime("background sync failed: %s" % type(error).__name__)

@@ -179,18 +179,20 @@ check(saved and saved[-1].get('study_selection')==[{'book':'literature','tags':[
 
 # 5. The window and sync controls are on the page with their defaults, because both
 #    change how Anki itself behaves and must not be buried in a config file.
-cfg.update(saved[-1]);cfg.pop('hide_main_on_close',None);cfg.pop('sync_background',None);saved.clear()
+cfg.update(saved[-1]);cfg.pop('hide_main_on_close',None);cfg.pop('sync_background',None);cfg.pop('sync_silent',None);saved.clear()
 def window_controls():
  d=dialog_now()
  book_check(d,'literature').setChecked(True)
- hide=d.findChild(QWidget,'hideMainOnClose'); sync=d.findChild(QWidget,'syncBackground'); mins=d.findChild(QWidget,'syncBackgroundMinutes')
+ hide=d.findChild(QWidget,'hideMainOnClose'); sync=d.findChild(QWidget,'syncBackground'); mins=d.findChild(QWidget,'syncBackgroundMinutes'); silent=d.findChild(QWidget,'syncSilent')
  check(hide is not None and hide.isChecked(),'关闭主窗口 must default to 只隐藏')
  check(sync is not None and sync.isChecked(),'后台同步 must be offered and on by default')
+ check(silent is not None and silent.isChecked(),'静默同步 must be offered and on by default')
  check(mins is not None and mins.value()==5,'同步间隔 must default to 5 分钟')
- hide.setChecked(False); sync.setChecked(False)
+ hide.setChecked(False); sync.setChecked(False); silent.setChecked(False)
  save_button(d).click()
 open_and(window_controls)
 check(saved and saved[-1]['hide_main_on_close'] is False and saved[-1]['sync_background'] is False,saved[-1] if saved else None)
+check(saved and saved[-1]['sync_silent'] is False,saved[-1] if saved else None)
 check(saved and saved[-1]['sync_background_minutes']==5,saved[-1] if saved else None)
 
 # 6. 朗读音量: Anki has no volume control, so the plug-in carries the gain itself. The dial

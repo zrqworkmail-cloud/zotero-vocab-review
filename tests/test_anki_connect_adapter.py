@@ -40,6 +40,7 @@ class AdapterTests(unittest.TestCase):
         self.adapter.answer_card(42, 3)
         self.assertEqual(self.calls[-1],
                          ('answerCards', {'answers': [{'cardId': 42, 'ease': 3}]}, {}))
+        self.assertEqual([call[0] for call in self.calls], ['answerCards'])
 
     def test_elapsed_answer_uses_json_rpc_scheduling(self):
         rpc_calls = []
@@ -59,6 +60,178 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(rpc_calls[0][1], {'cardId': '42'})
         self.assertEqual(rpc_calls[1][1], {'cardId': '42', 'rating': 'good',
                                            'stateToken': 'token-1', 'elapsedMs': 1250})
+
+    def test_stale_token_retries_after_revlog_confirms_no_write(self):
+        reviews = {'42': []}
+        rpc_calls = []
+        tokens = ['token-1', 'token-2']
+        answers = [0]
+
+        def rpc(method, params=None, **kwargs):
+            rpc_calls.append((method, params))
+            if method == 'scheduling.predict':
+                return {'stateToken': tokens.pop(0)}
+            if method == 'scheduling.answer':
+                answers[0] += 1
+                if answers[0] == 1:
+                    raise RuntimeError(module.STALE_TOKEN_MESSAGE)
+                return {'cardId': '42', 'reviewId': '101'}
+            raise AssertionError(method)
+
+        def request(action, params=None, **kwargs):
+            if action == 'getReviewsOfCards':
+                return {key: list(value) for key, value in reviews.items()}
+            raise AssertionError(action)
+
+        adapter = module.AnkiConnectAdapter(request, rpc=rpc)
+        self.assertEqual(adapter.answer_card(42, 3, elapsed_ms=1250), [True])
+        self.assertEqual(answers[0], 2)
+        self.assertEqual([call[0] for call in rpc_calls],
+                         ['scheduling.predict', 'scheduling.answer',
+                          'scheduling.predict', 'scheduling.answer'])
+
+    def test_stale_token_does_not_retry_when_revlog_has_new_entry(self):
+        reviews = {'42': [{'id': 100}]}
+        rpc_calls = []
+        answers = [0]
+
+        def rpc(method, params=None, **kwargs):
+            rpc_calls.append((method, params))
+            if method == 'scheduling.predict':
+                return {'stateToken': 'token-1'}
+            if method == 'scheduling.answer':
+                answers[0] += 1
+                reviews['42'].append({'id': 101})
+                raise RuntimeError(module.STALE_TOKEN_MESSAGE)
+            raise AssertionError(method)
+
+        def request(action, params=None, **kwargs):
+            if action == 'getReviewsOfCards':
+                return {key: list(value) for key, value in reviews.items()}
+            raise AssertionError(action)
+
+        adapter = module.AnkiConnectAdapter(request, rpc=rpc)
+        self.assertEqual(adapter.answer_card(42, 3, elapsed_ms=1250), [True])
+        self.assertEqual(answers[0], 1)
+        self.assertEqual([call[0] for call in rpc_calls],
+                         ['scheduling.predict', 'scheduling.answer'])
+
+    def test_non_stale_error_is_recovered_only_from_the_revlog(self):
+        reviews = {'42': [{'id': 100}]}
+        answers = [0]
+
+        def rpc(method, params=None, **kwargs):
+            if method == 'scheduling.predict':
+                return {'stateToken': 'token-1'}
+            if method == 'scheduling.answer':
+                answers[0] += 1
+                reviews['42'].append({'id': 101})
+                raise RuntimeError('transport failed after the write')
+            raise AssertionError(method)
+
+        def request(action, params=None, **kwargs):
+            if action == 'getReviewsOfCards':
+                return {key: list(value) for key, value in reviews.items()}
+            raise AssertionError(action)
+
+        adapter = module.AnkiConnectAdapter(request, rpc=rpc)
+        self.assertEqual(adapter.answer_card(42, 3, elapsed_ms=1250), [True])
+        self.assertEqual(answers[0], 1)
+
+    def test_non_stale_error_without_a_new_review_is_raised(self):
+        reviews = {'42': [{'id': 100}]}
+        answers = [0]
+
+        def rpc(method, params=None, **kwargs):
+            if method == 'scheduling.predict':
+                return {'stateToken': 'token-1'}
+            if method == 'scheduling.answer':
+                answers[0] += 1
+                raise RuntimeError('This card cannot be answered outside the reviewer.')
+            raise AssertionError(method)
+
+        def request(action, params=None, **kwargs):
+            if action == 'getReviewsOfCards':
+                return {key: list(value) for key, value in reviews.items()}
+            raise AssertionError(action)
+
+        adapter = module.AnkiConnectAdapter(request, rpc=rpc)
+        with self.assertRaisesRegex(RuntimeError, 'reviewer'):
+            adapter.answer_card(42, 3, elapsed_ms=1250)
+        self.assertEqual(answers[0], 1)
+
+    def test_retry_without_a_new_revlog_is_bounded_to_one_attempt(self):
+        reviews = {'42': []}
+        answers = [0]
+
+        def rpc(method, params=None, **kwargs):
+            if method == 'scheduling.predict':
+                return {'stateToken': 'token-1'}
+            if method == 'scheduling.answer':
+                answers[0] += 1
+                raise RuntimeError(module.STALE_TOKEN_MESSAGE)
+            raise AssertionError(method)
+
+        def request(action, params=None, **kwargs):
+            if action == 'getReviewsOfCards':
+                return {key: list(value) for key, value in reviews.items()}
+            raise AssertionError(action)
+
+        adapter = module.AnkiConnectAdapter(request, rpc=rpc)
+        with self.assertRaises(RuntimeError):
+            adapter.answer_card(42, 3, elapsed_ms=1250)
+        self.assertEqual(answers[0], 2)
+
+    def test_answer_without_review_id_requires_a_new_revlog_entry(self):
+        reads = [0]
+
+        def request(action, params=None, **kwargs):
+            if action == 'getReviewsOfCards':
+                reads[0] += 1
+                return {'42': [] if reads[0] == 1 else [{'id': 101}]}
+            raise AssertionError(action)
+
+        def rpc(method, params=None, **kwargs):
+            if method == 'scheduling.predict':
+                return {'stateToken': 'token-1'}
+            if method == 'scheduling.answer':
+                return {'cardId': '42'}
+            raise AssertionError(method)
+
+        adapter = module.AnkiConnectAdapter(request, rpc=rpc)
+        self.assertEqual(adapter.answer_card(42, 3, elapsed_ms=1250), [True])
+
+    def test_returned_review_id_must_be_newer_than_the_baseline(self):
+        def request(action, params=None, **kwargs):
+            if action == 'getReviewsOfCards':
+                return {'42': [{'id': 100}]}
+            raise AssertionError(action)
+
+        def rpc(method, params=None, **kwargs):
+            if method == 'scheduling.predict':
+                return {'stateToken': 'token-1'}
+            if method == 'scheduling.answer':
+                return {'cardId': '42', 'reviewId': '100'}
+            raise AssertionError(method)
+
+        adapter = module.AnkiConnectAdapter(request, rpc=rpc)
+        self.assertEqual(adapter.answer_card(42, 3, elapsed_ms=1250), [False])
+
+    def test_answer_without_a_review_id_or_revlog_entry_is_not_success(self):
+        def request(action, params=None, **kwargs):
+            if action == 'getReviewsOfCards':
+                return {'42': []}
+            raise AssertionError(action)
+
+        def rpc(method, params=None, **kwargs):
+            if method == 'scheduling.predict':
+                return {'stateToken': 'token-1'}
+            if method == 'scheduling.answer':
+                return {'cardId': '42'}
+            raise AssertionError(method)
+
+        adapter = module.AnkiConnectAdapter(request, rpc=rpc)
+        self.assertEqual(adapter.answer_card(42, 3, elapsed_ms=1250), [False])
 
     def test_a_failed_prediction_falls_back_before_writing(self):
         def rpc(method, params=None, **kwargs):
