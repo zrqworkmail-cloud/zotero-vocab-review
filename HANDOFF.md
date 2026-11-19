@@ -82,6 +82,21 @@ python tools/restart-anki.py --wait 300   # 等到空闲（没有卡片在屏 + 
 - **闸门**：492 unittest 全绿（须设 `APPDATA`）；离屏 Qt 33/34，唯一失败 `windows-judgment-rows.py` 是已知计时抖动，单跑 1/1。
 - **本轮部署**（`e143548`）：`pre-deploy-20261119-095500`（49 文件，fingerprint `c954692976c99cbe`）；`review_popup.py` `3E4A4FA4 → C0F84D38`；重启 `closed politely in 6.4 s`，计数 `5215/1312/284/6889` unchanged；`--check` exit 0，loaded 09:56:12 晚于安装 09:52:25。
 
+## 2.3 CI：runner 上的两个环境坑（2026-11-19）
+
+PR #26 的 Checks 在 `e143548` 变红：`Ran 481 tests ... FAILED (failures=1, errors=1)`。两个都不是业务逻辑错，是**只在本机 Windows 成立的环境假设**。
+
+1. **runner 没有 `APPDATA`**（`KeyError`，记为 error）。`tools/verify-state.py` 的 `appdata()` 原来写 `Path(os.environ['APPDATA'])`，ubuntu runner 直接抛异常，`test_every_layer_returns_lines` 在 deployed 层就断。还有第二处被它挡住：`layer_onscreen()` 走 `ctypes.windll`，Linux 上是 `AttributeError`。改法（`02432f5`）：`appdata()` 退化成 `Path.home()/'AppData'/'Roaming'`（与 `tools/pre-deploy-check.py` 已有写法一致），`desktop_is_visible()` 开头加 `sys.platform` 守卫。现在在没装 Anki 的机器上五层照样出字：`deployed` 给 `NOT INSTALLED: …`、`config` 给 `no meta.json`、`on-screen` 给 `SCREEN NOT VISIBLE (no Win32 desktop on linux)`。
+2. **runner 是 UTC，测试钉的是 +08:00**（failure）。`tools/count-revlog-time.py` 的 `parse_since()` 结尾 `return int(...), parsed.astimezone()` 把结果归一化到**机器时区**，于是 `2026-11-17T17:16:49+08:00` 在 UTC runner 上返回 `utcoffset()+00:00`，断言 `== 8h` 红。这不只是测试问题：同一命令在 UTC 机器上会落在**不同的日历日**，`window_days_for_since()` 跟着偏。改法：直接返回 `parsed`，保留用户写进去的偏移，epoch 毫秒不变。
+
+**复现捷径**：agent shell 里 `APPDATA` 本来就是空的，等价于 runner 条件——`python -B -m unittest discover -s tests -p 'test_*.py'` 当场就能看到同一个 KeyError，不必上 Linux。
+
+**action 升级（`5f8097d`）**：`checks.yml` 与 `release.yml` 里的 `checkout@v4` / `setup-node@v4` / `setup-python@v5` 全部改成 `@v7`（各自最新 release：checkout v7.0.1、setup-node v7.1.0、setup-python v7.1.0）。旧版本会在 job 里留一条 `Node.js 20 is deprecated … forced to run on Node.js 24`；升级后 `repos/<owner>/<repo>/check-runs/<job>/annotations` 返回 `count=0`。两个 workflow 都要改，只改 checks.yml 的话发版时 release.yml 还会再报一次。
+
+**证据**：run `44449553382`（`02432f5`）全绿，之前被 skip 的两个 `build.py` 步骤首次真正执行；run `44471541804`（`5f8097d`）全绿且 annotations 清零；本地 492 unittest OK（`APPDATA` 为空条件下）。
+
+**接手注意**：这个 clone 没有全局 git 身份，提交前先 `git config user.name/user.email`（本项目用 `Ruoquan Zhou <239778096+zrqworkmail-cloud@users.noreply.github.com>`）；远端会前进，`push` 前先 `git fetch` + `rebase`——本轮两次推送都撞到过新提交。
+
 ## 3. 现在的真实状态（2026-11-13；历史基线 2026-11-10，AUDIT §9.11 与 §9.13–§9.51；最新兼容验证见开头）
 
 > **2026-11-17 复核**：#65/#66 的部署已完成；`verify-state` 为 **46/46 文件匹配**安装目录，插件已于 **20:55:34** 加载。下面「文件未部署 / 部署 baseline / 接手后第一步」均为当时的交接记录，不代表当前状态。
