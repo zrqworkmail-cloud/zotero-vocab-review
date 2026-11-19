@@ -66,7 +66,7 @@ def connect(action: str, params: dict[str, Any] | None = None,
 
 
 def parse_since(value: str) -> tuple[int, datetime]:
-    """Return (epoch milliseconds, local datetime) for a CLI --since value."""
+    """Return (epoch milliseconds, the same instant keeping the given offset)."""
     text = value.strip()
     if not text:
         raise ValueError('--since cannot be empty')
@@ -100,7 +100,11 @@ def parse_since(value: str) -> tuple[int, datetime]:
     if parsed.tzinfo is None:
         # A date/time typed without an offset means the user's local clock.
         parsed = parsed.astimezone()
-    return int(parsed.timestamp() * 1000), parsed.astimezone()
+    # Keep the offset the value was written with. Normalising to the machine's
+    # timezone made the same command describe a different calendar day on a runner
+    # whose clock is UTC, which moved the candidate window and turned the pinned
+    # +08:00 assertion into a red build.
+    return int(parsed.timestamp() * 1000), parsed
 
 
 def window_days_for_since(since: datetime, now: datetime) -> int:

@@ -39,7 +39,11 @@ RUNTIME_ONLY = {'meta.json', 'config.json', 'difficulty.json'}
 
 
 def appdata() -> Path:
-    return Path(os.environ['APPDATA'])
+    # %APPDATA% only exists on Windows. A runner without it (CI, a clean Linux
+    # box) must still get a readable panel, so every layer reports "not installed"
+    # instead of raising KeyError partway down the list.
+    value = os.environ.get('APPDATA')
+    return Path(value) if value else Path.home() / 'AppData' / 'Roaming'
 
 
 def installed_dir() -> Path:
@@ -269,6 +273,9 @@ def desktop_is_visible() -> tuple:
     answers with pure black, so the pixels themselves are the honest signal.
     """
     import ctypes
+
+    if not sys.platform.startswith('win'):
+        return False, 'no Win32 desktop on %s' % sys.platform
 
     gdi32, user32 = ctypes.windll.gdi32, ctypes.windll.user32
     handle = ctypes.c_void_p
