@@ -97,6 +97,8 @@ PR #26 的 Checks 在 `e143548` 变红：`Ran 481 tests ... FAILED (failures=1, 
 
 **接手注意**：这个 clone 没有全局 git 身份，提交前先 `git config user.name/user.email`（本项目用 `Ruoquan Zhou <239778096+zrqworkmail-cloud@users.noreply.github.com>`）；远端会前进，`push` 前先 `git fetch` + `rebase`——本轮两次推送都撞到过新提交。
 
+**升级 action 后必须多看一步**：Checks 变绿只能证明 `checks.yml` 还能跑，`release.yml` 平时不触发，改坏了也不会泛红。用 `gh workflow list --repo <owner>/<repo> --all` 确认 `Checks` 与 `Release` 都是 `active`（本轮两个都 active）；工作流文件语法坏掉时 GitHub 会直接不认这个 workflow，这是最省事的一道闸。发版前如果没跑过 `release.yml`，至少先看一眼它还在列表里。
+
 ## 3. 现在的真实状态（2026-11-13；历史基线 2026-11-10，AUDIT §9.11 与 §9.13–§9.51；最新兼容验证见开头）
 
 > **2026-11-17 复核**：#65/#66 的部署已完成；`verify-state` 为 **46/46 文件匹配**安装目录，插件已于 **20:55:34** 加载。下面「文件未部署 / 部署 baseline / 接手后第一步」均为当时的交接记录，不代表当前状态。
