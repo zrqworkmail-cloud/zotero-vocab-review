@@ -19,6 +19,11 @@ except ImportError:
     from PyQt6.QtWidgets import QSizePolicy
 
 try:
+    from aqt.qt import QLayout
+except ImportError:
+    from PyQt6.QtWidgets import QLayout
+
+try:
     from aqt.qt import QPen
 except ImportError:
     from PyQt6.QtGui import QPen
@@ -1067,6 +1072,12 @@ class ReviewDialog(QDialog):
         layout = self.layout()
         layout.invalidate()
         layout.activate()
+        # A cloze card's example block is variable height and used to be settled by a zero
+        # timer *after* this fit, so the card changed height twice (measured 526x429 then
+        # 526x567, 1.26 s apart). Measure it here and there is one resize per card.
+        if self.fit_example_height():
+            layout.invalidate()
+            layout.activate()
         hint = layout.sizeHint().height()
         if hint <= 0:
             return
@@ -1081,11 +1092,16 @@ class ReviewDialog(QDialog):
         needed = ceiling
         if abs(window.height() - needed) < 24:
             return                      # a tolerance, so repeated flips do not jitter
+        top = window.y()
         window.resize(window.width(), needed)
+        # The top edge is the anchor: a resize must never move the card. It used to re-centre
+        # on the screen afterwards, so answering (the face grows 210 px) slid it 105 px up.
+        if window.y() != top:
+            window.move(window.x(), top)
         window.update()
         if window is not self and hasattr(window, 'position_window'):
-            # The host owns the on-screen rectangle, so it re-anchors after either change:
-            # growing downward can push the foot off the screen, shrinking can float it.
+            # The host still clamps itself back inside the work area: a card that grows near
+            # the bottom edge would otherwise put its foot off the screen.
             window.position_window()
 
     def ensure_row_fits(self):
@@ -1192,17 +1208,36 @@ class ReviewDialog(QDialog):
             self.activateWindow()
             self.letter_boxes[0].setFocus()
 
+    def fit_example_height(self):
+        """Settle the cloze example block's height, and say whether it changed.
+
+        Called from `fit_card_height` so the block is measured in the same pass as the rest
+        of the card. Returns False when there is nothing to measure yet (the block was never
+        laid out, so any height invented here would be wrong) or when it already fits.
+        """
+        area = getattr(self, 'question_examples', None)
+        if area is None:
+            return False
+        content = area.widget()
+        layout = content.layout() if content is not None else None
+        if layout is None:
+            return False
+        width = area.viewport().width() - 8
+        if width < 100:
+            return False
+        _screen, work = self._anchor_area()
+        height = max(layout.heightForWidth(width), content.sizeHint().height()) + 4
+        ceiling = max(120, work.height() - 430) if work is not None else height
+        wanted = min(height, ceiling)
+        if area.height() == wanted:
+            return False
+        area.setFixedHeight(wanted)
+        return True
+
     def resize_question_examples(self):
-        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
-        if not screen or not self.question_examples.isVisible():
-            return
-        width = max(100, self.question_examples.viewport().width() - 8)
-        content = self.question_examples.widget()
-        height = max(content.layout().heightForWidth(width), content.sizeHint().height()) + 4
-        self.question_examples.setFixedHeight(min(height, max(120, screen.availableGeometry().height() - 430)))
-        if getattr(self, '_handoff_geometry', None) is None:
-            self.adjustSize()
-            self.position_window()
+        """Late route for a card nothing else fitted (the offscreen harnesses show one directly)."""
+        self.fit_example_height()
+        self.fit_card_height()
 
     def _set_pin_icon(self):
         """The pushpin carries the state: upright and filled, or tipped over as a line."""
@@ -1257,14 +1292,55 @@ class ReviewDialog(QDialog):
         except Exception as error:
             self.status.setText('Anki 没能退出：%s' % type(error).__name__)
 
-    def position_window(self):
-        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
-        if screen:
-            area = screen.availableGeometry()
-            if self.position == 'center':
-                self.move(area.center().x() - self.width() // 2, area.center().y() - self.height() // 2)
-            else:
-                self.move(area.right() - self.width() - 20, area.bottom() - self.height() - 20)
+    def _anchor_area(self):
+        """The screen this card lives on and its work area, resolved fresh every call.
+
+        The QScreen *wrapper* must never be stored: Qt rebuilds those objects when the
+        display configuration changes, and a cached one then raises `RuntimeError: wrapped
+        C/C++ object of type QScreen has been deleted` the next time it is touched. Only the
+        screen's name is kept, which is stable (for example "DISPLAY1"). Falls back to the screen
+        under the pointer and then to the primary one.
+        """
+        name = getattr(self, '_anchor_screen_name', None)
+        candidates = []
+        if name:
+            candidates.extend(s for s in QApplication.screens() if s.name() == name)
+        candidates.append(QApplication.screenAt(QCursor.pos()))
+        candidates.append(QApplication.primaryScreen())
+        for screen in candidates:
+            if screen is None:
+                continue
+            try:
+                return screen, screen.availableGeometry()
+            except RuntimeError:          # a wrapper deleted between lookup and use
+                continue
+        return None, None
+
+    def position_window(self, force=False):
+        """Place the card once, then only keep it inside the screen it was placed on.
+
+        This used to run on every height change and to re-derive the screen from
+        `screenAt(QCursor.pos())`. Measured on the real machine (2026-11-18, probe-card-switch):
+        answering grew the window 210 px and slid it 105 px up, and — because the card had been
+        carried to the primary screen while the pointer sat on the other monitor — one resize
+        also moved it 575 px sideways. A placed card keeps its rectangle; only one that would
+        leave the work area is pulled back in.
+        """
+        screen, area = self._anchor_area()
+        if screen is None or area is None:
+            return
+        placed = getattr(self, '_anchor_screen_name', None)
+        if placed is not None and not force:
+            x = min(max(self.x(), area.left()), area.right() - self.width() + 1)
+            y = min(max(self.y(), area.top()), area.bottom() - self.height() + 1)
+            if (x, y) != (self.x(), self.y()):
+                self.move(x, y)
+            return
+        if self.position == 'center':
+            self.move(area.center().x() - self.width() // 2, area.center().y() - self.height() // 2)
+        else:
+            self.move(area.right() - self.width() - 20, area.bottom() - self.height() - 20)
+        self._anchor_screen_name = screen.name()
 
     def themed_speaker_icon(self, size=32):
         glyph, disc, ring = SPEAKER_COLORS['dark' if self.cfg.get('review_theme') == 'dark' else 'light']
@@ -1827,6 +1903,18 @@ class ReviewDialog(QDialog):
     def reveal(self, correct):
         if self.answer_shown:
             return
+        # Qt's default layout constraint pushes the layout's minimum height onto the window,
+        # so the answer face used to grow in silent steps before fit_card_height() ran: on
+        # 2026-11-19 the live window went 477 -> 583 -> 687 and only the last one was ours
+        # (the first two came from `answer_scroll.show()` and `grade_widget.show()` raising
+        # the floor). `setMinimumHeight(0)` does not stop it - Qt writes the minimum back on
+        # the next layout activation, measured at 173 then 471 in probe-answer-reflow.py.
+        # Dropping the constraint does: measured one resize, 677, from the same 477 start.
+        # The window therefore no longer has a floor of its own, which is why every path
+        # that adds height (birth, reveal, the three hint buttons) still calls
+        # fit_card_height().
+        if self.layout() is not None:
+            self.layout().setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         self.setUpdatesEnabled(False)
         self._flipping = True
         try:
@@ -2576,9 +2664,10 @@ class DesktopReviewController:
             # build themselves, and one of them died in native code.
             self.dialog.fit_card_height()
             if previous is None:
-                # The opener is its own window, so the shrink has to be re-anchored; a card
-                # handed over to a host is repositioned by the host's own resize path.
-                self.dialog.position_window()
+                # The opener is its own window and was centred at its birth height, so the
+                # first fitted shrink is the one moment it may legitimately re-centre; every
+                # later resize keeps the top edge (see `position_window`).
+                self.dialog.position_window(force=True)
                 self.review_host = self.dialog
             # Which queue this card came from and where it sat in the group — without this,
             # "did the mixed order actually fire?" is only answerable by watching the card.
@@ -2918,7 +3007,7 @@ class DesktopReviewController:
                 self.log('review rating saved')
             except Exception as raised:
                 error = str(raised) or type(raised).__name__
-                self.log('review save failed: %s' % type(raised).__name__)
+                self.log('review save failed: %s: %s' % (type(raised).__name__, error))
             self.signals.saved.emit(dialog, generation, error)
 
         threading.Thread(target=save, daemon=True).start()
