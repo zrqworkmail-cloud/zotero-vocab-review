@@ -70,6 +70,18 @@ python tools/restart-anki.py --wait 300   # 等到空闲（没有卡片在屏 + 
 - **托盘插件**：`85158043`「Minimize to Tray 2」已禁用，原 `meta.json` 备份在 `anki-authority-audit/deployment-backups/tray-addon-85158043-meta-20261117.json`；无复习卡时点 X 已实测 `ANKI_EXITED`，随后重启成功。建议 git 提交信息：`tools: add revlog time audit and self-check`。
 - **部署状态**：本工具与测试属于源码/自检，不改 addon 安装目录，无需部署或重启。
 
+## 2.2 本轮提交说明（2026-11-19，已提交并推送）
+
+三个提交 `e143548` → `8591e7d` → `336aa23`，`origin/feat/review-acceptance` 已同步（ahead 0）。
+
+- **`e143548` 揭晓只改一次高**。病根不是插件的 `resize`，而是 Qt `QLayout` 默认的 `SetDefaultConstraint` 把布局最小高度压到顶层窗口上：真实揭晓时 `answer_scroll.show()` 把下限抬到 583、`grade_widget.show()` 再抬，Qt 自己撑大窗口，最后才是 `fit_card_height()` 的 687。实测 `setMinimumHeight(0)` **无效**（下次布局激活就把最小高度写回：0→173→471）；在 `reveal()` 里对布局设 `SetNoConstraint` 才有效。
+- **证据工具** `tools/probe-answer-reflow.py`（新增）：同时记录 Python 层 `resize` 调用栈、Resize 事件、布局 `minimumSize` / `sizeHint` / `heightForWidth`。同一张卡从 477 起揭晓，基线 3 次改高（499→546→677，前两次无 Python 调用），`SetNoConstraint` 后 1 次（677）。
+- **真机前后对比**（`probe-card-switch`；before `zvr-switch-20261119-092347.jsonl`，after `zvr-switch-20261119-100850.jsonl`）：before 抓到 `477→583→687`；after 10 次揭晓全部单步（486/537/542/543/477/512→687、571/607/661→725），19 次改高 `dy=0`，y 恒 256，中间态未复现。
+- **`8591e7d` 三项修复**：静默后台同步（`sync_background` / `sync_silent` / `sync_background_minutes=5`）、未捕获异常进运行日志（串联而非替换 `sys` / `threading.excepthook`）、评分写入校验（`STALE_TOKEN_MESSAGE` + revlog 前后比对，仅 stale 拒绝重试一次）。
+- **`336aa23` 重建 dist，红线：dist 只能从干净工作区重建**。重建前 dist 与任何提交都不一致——`review_popup.py` 落后一版、`__init__.py` 落后两版、`config.json` 等于工作区而非 HEAD，因为它是从带未提交改动的工作区打的。重建后 `.zip` 47 条 / `.ankiaddon` 48 条与同提交源码逐字节一致，`SHA256SUMS` 核对通过，`tests/test_build.py` 4 条通过。以后顺序固定：先提交源码 → 再 `python anki-global-addon/build.py` → dist 单独一个提交。
+- **闸门**：492 unittest 全绿（须设 `APPDATA`）；离屏 Qt 33/34，唯一失败 `windows-judgment-rows.py` 是已知计时抖动，单跑 1/1。
+- **本轮部署**（`e143548`）：`pre-deploy-20261119-095500`（49 文件，fingerprint `c954692976c99cbe`）；`review_popup.py` `3E4A4FA4 → C0F84D38`；重启 `closed politely in 6.4 s`，计数 `5215/1312/284/6889` unchanged；`--check` exit 0，loaded 09:56:12 晚于安装 09:52:25。
+
 ## 3. 现在的真实状态（2026-11-13；历史基线 2026-11-10，AUDIT §9.11 与 §9.13–§9.51；最新兼容验证见开头）
 
 > **2026-11-17 复核**：#65/#66 的部署已完成；`verify-state` 为 **46/46 文件匹配**安装目录，插件已于 **20:55:34** 加载。下面「文件未部署 / 部署 baseline / 接手后第一步」均为当时的交接记录，不代表当前状态。
