@@ -79,7 +79,7 @@ python tools/restart-anki.py --wait 300   # 等到空闲（没有卡片在屏 + 
 - **真机前后对比**（`probe-card-switch`；before `zvr-switch-20261119-092347.jsonl`，after `zvr-switch-20261119-100850.jsonl`）：before 抓到 `477→583→687`；after 10 次揭晓全部单步（486/537/542/543/477/512→687、571/607/661→725），19 次改高 `dy=0`，y 恒 256，中间态未复现。
 - **`8591e7d` 三项修复**：静默后台同步（`sync_background` / `sync_silent` / `sync_background_minutes=5`）、未捕获异常进运行日志（串联而非替换 `sys` / `threading.excepthook`）、评分写入校验（`STALE_TOKEN_MESSAGE` + revlog 前后比对，仅 stale 拒绝重试一次）。
 - **`336aa23` 重建 dist，红线：dist 只能从干净工作区重建**。重建前 dist 与任何提交都不一致——`review_popup.py` 落后一版、`__init__.py` 落后两版、`config.json` 等于工作区而非 HEAD，因为它是从带未提交改动的工作区打的。重建后 `.zip` 47 条 / `.ankiaddon` 48 条与同提交源码逐字节一致，`SHA256SUMS` 核对通过，`tests/test_build.py` 4 条通过。以后顺序固定：先提交源码 → 再 `python anki-global-addon/build.py` → dist 单独一个提交。
-- **闸门**：492 unittest 全绿（须设 `APPDATA`）；离屏 Qt 33/34，唯一失败 `windows-judgment-rows.py` 是已知计时抖动，单跑 1/1。
+- **闸门**：492 unittest 全绿（**`APPDATA` 已不需显式设置**，空环境下也能跑，见 §2.3 的 `02432f5`；上面 §2.1 那句“显式设置 `APPDATA`”是当轮记录，已不适用）；离屏 Qt 33/34，唯一失败 `windows-judgment-rows.py` 是已知计时抖动，单跑 1/1。
 - **本轮部署**（`e143548`）：`pre-deploy-20261119-095500`（49 文件，fingerprint `c954692976c99cbe`）；`review_popup.py` `3E4A4FA4 → C0F84D38`；重启 `closed politely in 6.4 s`，计数 `5215/1312/284/6889` unchanged；`--check` exit 0，loaded 09:56:12 晚于安装 09:52:25。
 
 ## 2.3 CI：runner 上的两个环境坑（2026-11-19）
