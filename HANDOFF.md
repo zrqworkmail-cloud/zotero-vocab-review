@@ -101,6 +101,12 @@ PR #26 的 Checks 在 `e143548` 变红：`Ran 481 tests ... FAILED (failures=1, 
 - **通用经验**（与宿主无关）：方法论沉淀在仓库内 `docs/插件开发全流程执行手册_v1.0.md` **§19 通用经验**（先量后改、框架也会动手、改动要先证明生效、包=安装目录=运行中代码、写后校验、钩子串联、只读探针、同口径对比、部署受控、规则带出处），上线前清单见 **§19.13**；`plugin-development` skill 的 `## General Experience` 只保留指向本文件的指针，不重复维护。手册是唯一副本（2026-11-19 从 SCNet 工作区移入仓库，工作区那份已删）。
 - **文档归位（2026-11-19）**：`插件开发全流程执行手册_v1.0.md` 从 SCNet 工作区移入本仓库 `docs/`，成为唯一副本（工作区那份已删除）；HANDOFF 用仓库相对路径 `docs/插件开发全流程执行手册_v1.0.md`，`plugin-development` skill 用绝对路径并注明「按仓库相对名解析，不按盘符」；随提交 `3a5df41` 入库（`5c80677..3a5df41` 推送，网络中断后由 HTTPS 重试成功）。
 
+### 2.3 收尾状态（2026-11-20）
+
+- **五层一次跑完**：`python tools/verify-state.py`。`loaded` 层要求 Anki 真的在跑（add-on start 晚于最新安装文件），Anki 没启动时这层只能报「无法确认」，别当成通过。
+- **dist 比对要去掉换行差异**：`git show HEAD:` 取的是 LF blob，直接和包内文件比会有 6 个文件假不一致（`__init__.py`、`candy_badge.py`、`config.json`、`input_mode.py`、`lexicon/syllables_supplement.txt`、`motion_view.py`）；做 CRLF 归一后再比才是 0 差异，或者直接跟磁盘文件比。
+- **项目 MEMORY.md 写不进去**：`%USERPROFILE%\.sclaw\agent\projects\<id>\MEMORY.md` 被客户端保护（写入直接报 `Access to application credentials is forbidden`）。项目级长期事实写在本文件的 §2.2/§2.3 与 §6，不要指望那边的 memory。
+
 ## 3. 现在的真实状态（2026-11-13；历史基线 2026-11-10，AUDIT §9.11 与 §9.13–§9.51；最新兼容验证见开头）
 
 > **2026-11-17 复核**：#65/#66 的部署已完成；`verify-state` 为 **46/46 文件匹配**安装目录，插件已于 **20:55:34** 加载。下面「文件未部署 / 部署 baseline / 接手后第一步」均为当时的交接记录，不代表当前状态。
