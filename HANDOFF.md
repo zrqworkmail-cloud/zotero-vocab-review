@@ -261,6 +261,9 @@ TTS 音量偏小。Anki 没有音量参数（`aqt/tts.py`、`aqt/sound.py` 均�
 - **`verify-state` 部署层只哈希顶层 `*.py`，不查 `lexicon/` 数据文件**：新增/改词典补充文件后面板会假绿，部署后必须手动比对哈希。
 - **`windows-judgment-rows.py` 是计时敏感的离屏检查，全量里偶发一次红**（单跑与复跑都绿）。看到 33/34 先单跑这一条复现，别当成回归。
 
+- **推 GitHub 失败有三种形态，都不是凭证问题**：`Failed to connect ... Could not connect to server`（连不上）、`the remote end hung up unexpectedly`（能握手、传到一半断）、`Recv failure: Connection was reset`（握手中断）。同一天内三种会交替出现，说明是链路对 GitHub 的间歇干扰。`http.postBuffer` 对 reset 无效（2026-11-20 实测）。
+- **推送重试才是正解**：每 2 分钟一次、最多 5 次，2026-11-20 两次都是前 4 次失败、第 5 次通过；判据只看 `git rev-list --count origin/<branch>..HEAD` 是否为 0，**不要相信输出里的 `Everything up-to-date`**（它曾与 fatal 同时出现，实际 ahead=1）。本机 SSH 备选已排除：`github.com:22` TCP 不通；`ssh.github.com:443` 虽 TCP 可达，`ssh -p 443 -T git@ssh.github.com` 仍 `exit=255` 且无输出 —— 遇到推送失败别浪费时间切 remote。
+
 ## 7. 红线（用户原话，逐条遵守）
 
 - 源码工作区有大量未提交和未跟踪的项目文件，请保留，不要直接清理、重置或覆盖。
